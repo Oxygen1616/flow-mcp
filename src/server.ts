@@ -68,7 +68,11 @@ export async function startServer(core: Core): Promise<ServerRole> {
   const token = randomBytes(24).toString("hex");
   // FLOW_MCP_ALLOW_HOSTS adds extra Host values (e.g. "192.168.1.20:8787") for a LAN client such as n8n. The token still applies.
   const extraHosts = (process.env.FLOW_MCP_ALLOW_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean);
-  const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, ...extraHosts]);
+  const allowAnyHost = (process.env.FLOW_MCP_ALLOW_HOSTS ?? "").includes("*");
+  const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `127.0.0.1`, `localhost`, ...extraHosts]);
+  for (const h of extraHosts) {
+    if (h.includes(":")) allowedHosts.add(h.split(":")[0]);
+  }
 
   const server = createServer(async (req, res) => {
     try {
@@ -80,7 +84,8 @@ export async function startServer(core: Core): Promise<ServerRole> {
       if (url.pathname === "/favicon.ico") return void res.writeHead(204).end();
       if (req.method === "GET" && url.pathname === "/") {
         // The page embeds the API token, so it is only ever handed to this computer, even when the server listens on the LAN.
-        if (!LOCAL_ADDRESSES.has(req.socket.remoteAddress ?? "")) return json(res, 404, { error: "Not found." });
+        const allowLan = process.env.FLOW_MCP_ALLOW_LAN_STUDIO === "true" || process.env.FLOW_MCP_BIND === "0.0.0.0";
+        if (!allowLan && !LOCAL_ADDRESSES.has(req.socket.remoteAddress ?? "")) return json(res, 404, { error: "Not found." });
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token));
       }
