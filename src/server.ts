@@ -65,7 +65,11 @@ export type ServerRole = "owner" | "client" | "none";
 // owns the port (that process owns the Flow tab and the queue), "none" when the port is taken by something else.
 export async function startServer(core: Core): Promise<ServerRole> {
   mkdirSync(UPLOAD_DIR, { recursive: true });
-  const token = randomBytes(24).toString("hex");
+  // FLOW_MCP_TOKEN pins the API token so clients such as n8n keep working across restarts. Without it, a new random
+  // token is made on every start. A pinned token must be long enough not to be guessable.
+  const pinned = process.env.FLOW_MCP_TOKEN?.trim();
+  if (pinned && pinned.length < 16) throw new Error("FLOW_MCP_TOKEN must be at least 16 characters.");
+  const token = pinned || randomBytes(24).toString("hex");
   // FLOW_MCP_ALLOW_HOSTS adds extra Host values (e.g. "192.168.1.20:8787") for a LAN client such as n8n. The token still applies.
   const extraHosts = (process.env.FLOW_MCP_ALLOW_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean);
   const allowAnyHost = (process.env.FLOW_MCP_ALLOW_HOSTS ?? "").includes("*");
