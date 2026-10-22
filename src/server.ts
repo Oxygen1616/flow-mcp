@@ -83,8 +83,10 @@ export async function startServer(core: Core): Promise<ServerRole> {
       if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { name: "flow-mcp" });
       if (url.pathname === "/favicon.ico") return void res.writeHead(204).end();
       if (req.method === "GET" && url.pathname === "/") {
-        // The page embeds the API token, so it is only ever handed to this computer, even when the server listens on the LAN.
-        const allowLan = process.env.FLOW_MCP_ALLOW_LAN_STUDIO === "true" || process.env.FLOW_MCP_BIND === "0.0.0.0";
+        // The page embeds the API token, so it is only handed to this computer unless FLOW_MCP_ALLOW_LAN_STUDIO=true says
+        // otherwise. Binding to 0.0.0.0 alone must not expose it: every Docker container binds that way. Only opt in when
+        // something else (e.g. Umbrel's app login) stands in front of the page.
+        const allowLan = process.env.FLOW_MCP_ALLOW_LAN_STUDIO === "true";
         if (!allowLan && !LOCAL_ADDRESSES.has(req.socket.remoteAddress ?? "")) return json(res, 404, { error: "Not found." });
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token));
