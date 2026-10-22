@@ -10,6 +10,7 @@ import { OUTPUT_ROOT, shapes, type Core } from "./core.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
 export const TOKEN_FILE = join(HOME_DIR, "token");
+const LOCAL_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 const UPLOAD_DIR = join(HOME_DIR, "uploads");
 const STUDIO_HTML = fileURLToPath(new URL("../studio/index.html", import.meta.url));
 const MAX_UPLOAD = 200 * 1024 * 1024;
@@ -65,7 +66,9 @@ export type ServerRole = "owner" | "client" | "none";
 export async function startServer(core: Core): Promise<ServerRole> {
   mkdirSync(UPLOAD_DIR, { recursive: true });
   const token = randomBytes(24).toString("hex");
-  const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+  // FLOW_MCP_ALLOW_HOSTS adds extra Host values (e.g. "192.168.1.20:8787") for a LAN client such as n8n. The token still applies.
+  const extraHosts = (process.env.FLOW_MCP_ALLOW_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+  const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, ...extraHosts]);
 
   const server = createServer(async (req, res) => {
     try {
@@ -76,6 +79,8 @@ export async function startServer(core: Core): Promise<ServerRole> {
       if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { name: "flow-mcp" });
       if (url.pathname === "/favicon.ico") return void res.writeHead(204).end();
       if (req.method === "GET" && url.pathname === "/") {
+        // The page embeds the API token, so it is only ever handed to this computer, even when the server listens on the LAN.
+        if (!LOCAL_ADDRESSES.has(req.socket.remoteAddress ?? "")) return json(res, 404, { error: "Not found." });
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token));
       }
@@ -108,7 +113,8 @@ export async function startServer(core: Core): Promise<ServerRole> {
 
   const listening = await new Promise<boolean>((ok) => {
     server.once("error", () => ok(false));
-    server.listen(PORT, "127.0.0.1", () => ok(true));
+    // Localhost unless FLOW_MCP_BIND says otherwise (e.g. 0.0.0.0 so an n8n server on the LAN can reach it).
+    server.listen(PORT, process.env.FLOW_MCP_BIND ?? "127.0.0.1", () => ok(true));
   });
   if (listening) {
     mkdirSync(HOME_DIR, { recursive: true });

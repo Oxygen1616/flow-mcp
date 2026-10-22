@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { assemble, localVoices, speakLocally, voiceTrack } from "./assemble.js";
 import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakWithGemini } from "./gemini.js";
+import { KOKORO_VOICES, kokoroReady, speakWithKokoro } from "./kokoro.js";
 import { extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
@@ -139,6 +140,12 @@ export const shapes = {
       ),
     output_name: z.string().default("final"),
     hold_last_frame: z.boolean().default(true).describe("Freeze the final frame so a longer voiceover is not cut off."),
+    still_seconds: z
+      .number()
+      .min(1)
+      .max(20)
+      .default(5)
+      .describe("Length of each still image in `clips` (image files like scene-01.jpeg become a slow push-in, 1080x1920 portrait, silent). Default 5 s."),
   },
   transcribe: {
     video: z.string().min(1).describe("Absolute path of a video or audio file on this computer."),
@@ -161,14 +168,15 @@ export const shapes = {
   narrate: {
     project: z.string().min(1).describe("Folder for the narration audio."),
     engine: z
-      .enum(["gemini", "mac"])
+      .enum(["gemini", "mac", "kokoro"])
       .default("gemini")
       .describe(
-        "'gemini' uses Google AI Studio's text-to-speech - the same voices Flow has, free on the AI Studio tier, no length limit, needs a key in ~/.flow-mcp/gemini-key. 'mac' uses a voice installed on this computer (macOS voices on a Mac, the built-in speech voices on Windows): free, instant, no key.",
+        "'gemini' uses Google AI Studio's text-to-speech - the same voices Flow has, free on the AI Studio tier, no length limit, needs a key in ~/.flow-mcp/gemini-key. 'mac' uses a voice installed on this computer (macOS voices on a Mac, the built-in speech voices on Windows): free, instant, no key. 'kokoro' runs the local Kokoro model (voice am_puck etc.): free, offline, no key, needs Python with kokoro-onnx and the model in ~/.flow-mcp/kokoro.",
       ),
     text: z.string().min(1).max(400).describe("The line to speak. About 20 words fits 8 s, 30 words fits 12 s; anything longer needs a longer take."),
-    voice: z.string().min(1).default("Charon").describe("Voice name from flow_voices, e.g. Charon (informative), Aoede (breezy), Gacrux (mature) for Google; Zoe or Samantha for macOS."),
+    voice: z.string().min(1).default("Charon").describe("Voice name from flow_voices, e.g. Charon (informative), Aoede (breezy), Gacrux (mature) for Google; Zoe or Samantha for macOS; am_puck or af_heart for Kokoro."),
     style: z.string().max(200).optional().describe("Delivery note for the 'gemini' engine, e.g. 'slowly and warmly, like a documentary narrator'."),
+    speed: z.number().min(0.5).max(1.5).optional().describe("Speaking speed for the 'kokoro' engine, 1 = normal. Default 0.85, which suits comedy timing."),
   },
   edit: {
     project: z.string().min(1).describe("Local folder for the edited clip."),
@@ -624,14 +632,19 @@ export class LocalCore implements Core {
   async voices() {
     // The panel words itself from these, so a PC never reads "this Mac".
     const place = { computer: COMPUTER, bin: BIN, local_engine: IS_MAC ? "macOS voice" : IS_WIN ? "Windows voice" : "System voice", platform: process.platform };
-    return { gemini: GEMINI_VOICES, gemini_ready: Boolean(geminiKey()), mac: await localVoices(), place };
+    return { gemini: GEMINI_VOICES, gemini_ready: Boolean(geminiKey()), mac: await localVoices(), kokoro: KOKORO_VOICES, kokoro_ready: kokoroReady(), place };
   }
 
-  async narrate({ project, text, voice, engine, style }: Args<"narrate">) {
+  async narrate({ project, text, voice, engine, style, speed }: Args<"narrate">) {
     const output_dir = projectDir(project);
     mkdirSync(output_dir, { recursive: true });
     const target = join(output_dir, `${this.nextStem(output_dir, "narration")}.m4a`);
-    const spoken = engine === "mac" ? await speakLocally(text.trim(), voice, target) : await speakWithGemini(text.trim(), voice, target, style);
+    const spoken =
+      engine === "mac"
+        ? await speakLocally(text.trim(), voice, target)
+        : engine === "kokoro"
+          ? await speakWithKokoro(text.trim(), voice, target, speed)
+          : await speakWithGemini(text.trim(), voice, target, style);
     return { output_dir, credits: 0, engine, voice, ...spoken };
   }
 

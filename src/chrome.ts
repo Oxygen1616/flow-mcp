@@ -14,11 +14,11 @@ export const inEnglish = (url: string): string => {
   u.searchParams.set("hl", "en");
   return u.toString();
 };
-const FLOW_HOSTS = /^https:\/\/(flow\.google\.com|labs\.google\/fx)/;
+const FLOW_HOSTS = /^https:\/\/(flow\.google\.com|labs\.google\/fx|accounts\.google\.com)/;
 export const HOME_DIR = process.env.FLOW_MCP_HOME ?? join(homedir(), ".flow-mcp");
 export const PROFILE_DIR = join(HOME_DIR, "chrome-profile");
 export const CDP_PORT = Number(process.env.FLOW_MCP_CDP_PORT ?? 9333);
-const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
+export const CDP_URL = process.env.FLOW_MCP_CDP_URL ?? `http://127.0.0.1:${CDP_PORT}`;
 
 const CHROME_PATHS = [
   process.env.FLOW_MCP_CHROME,
@@ -52,18 +52,21 @@ export function chromeExecutable(): string {
 async function launchChrome(): Promise<void> {
   const chromePath = chromeExecutable();
   mkdirSync(PROFILE_DIR, { recursive: true });
-  const child = spawn(
-    chromePath,
-    [
-      `--user-data-dir=${PROFILE_DIR}`,
-      `--remote-debugging-port=${CDP_PORT}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      inEnglish(FLOW_URL),
-    ],
-    { detached: true, stdio: "ignore" },
-  );
-  child.unref();
+  const args = [
+    `--user-data-dir=${PROFILE_DIR}`,
+    `--remote-debugging-port=${CDP_PORT}`,
+    "--disable-extensions",
+    "--no-first-run",
+    "--no-default-browser-check",
+    inEnglish(FLOW_URL),
+  ];
+  if (process.platform === "win32") {
+    const child = spawn("cmd.exe", ["/c", "start", '""', chromePath, ...args], { detached: true, stdio: "ignore" });
+    child.unref();
+  } else {
+    const child = spawn(chromePath, args, { detached: true, stdio: "ignore" });
+    child.unref();
+  }
   for (let i = 0; i < 40; i++) {
     if (await cdpUp()) return;
     await new Promise((r) => setTimeout(r, 500));
@@ -73,16 +76,24 @@ async function launchChrome(): Promise<void> {
 
 export async function getBrowser(): Promise<Browser> {
   if (browser?.isConnected()) return browser;
-  if (!(await cdpUp())) await launchChrome();
+  if (!process.env.FLOW_MCP_CDP_URL) {
+    if (!(await cdpUp())) await launchChrome();
+  }
   browser = await chromium.connectOverCDP(CDP_URL);
   return browser;
 }
 
 export async function getFlowPage(): Promise<Page> {
   const b = await getBrowser();
-  const context = b.contexts()[0];
-  if (!context) throw new Error("Chrome has no browser context; restart the Flow Chrome window.");
-  const existing = context.pages().find((p) => FLOW_HOSTS.test(p.url()));
+  let context = b.contexts()[0];
+  if (!context) context = await b.newContext();
+  const pages = context.pages();
+  const projectPage = pages.find((p) => /\/project\//.test(p.url()));
+  if (projectPage) {
+    await ensureEnglish(projectPage);
+    return projectPage;
+  }
+  const existing = pages.find((p) => FLOW_HOSTS.test(p.url()));
   if (existing) {
     await ensureEnglish(existing);
     return existing;

@@ -25,10 +25,19 @@ const pause = (page: Page, ms: number) => page.waitForTimeout(ms);
 // `detailed` opens the account panel to read the balance, so it must not run while a generation is driving the page.
 export async function getFlowState(detailed = false): Promise<FlowState> {
   const page = await getFlowPage();
-  const url = page.url();
+  let url = page.url();
   // Signed-out visitors are bounced to the marketing page or Google's sign-in.
   const signedIn = !/\/about|accounts\.google\.com/.test(url);
-  const inProject = /\/project\//.test(url);
+  let inProject = /\/project\//.test(url);
+  if (signedIn && !inProject) {
+    const newBtn = page.getByRole("button", { name: /New project/i }).or(page.locator("text=New project")).first();
+    if (await newBtn.isVisible().catch(() => false)) {
+      await newBtn.click().catch(() => {});
+      await page.waitForURL(/\/project\//, { timeout: 10_000 }).catch(() => {});
+      url = page.url();
+      inProject = /\/project\//.test(url);
+    }
+  }
   const state: FlowState = { url, signedIn, inProject };
   if (!signedIn) state.hint = "Not signed in. Run `npm run login` and sign in to Google in the Flow Chrome window.";
   else if (!inProject) state.hint = "Signed in, but no project is open. Open or create a project in the Flow Chrome window.";
@@ -42,6 +51,10 @@ export async function getFlowState(detailed = false): Promise<FlowState> {
 
 // Menus close on Escape; the account panel does not and needs its own close button.
 async function dismissOverlays(page: Page): Promise<void> {
+  // Google occasionally places its cookie notice across the bottom of the composer. It is outside Flow's
+  // overlay container, so settings and generation buttons remain visible to Playwright but cannot receive clicks.
+  const cookie = page.getByRole("button", { name: /OK, got it/i });
+  if (await cookie.isVisible().catch(() => false)) await cookie.click({ timeout: 5000 }).catch(() => {});
   await leaveSideMenu(page);
   await page.keyboard.press("Escape");
   const closePanel = page.getByRole("button", { name: "Close account panel" });
@@ -755,6 +768,19 @@ async function showAllMedia(page: Page, thorough = false): Promise<void> {
 }
 
 async function ensureProjectGrid(page: Page): Promise<void> {
+  // Flow can leave the project inside the Agent settings sheet after a failed or interrupted run. The ordinary
+  // composer is still mounted underneath, but all of its controls are hidden, so close the sheet before locating
+  // composer settings. The Back button returns to the agent composer without discarding project media.
+  const agentBack = page.locator("flow-agent-panel").getByRole("button", { name: "Back", exact: true });
+  if (await agentBack.isVisible().catch(() => false)) {
+    await agentBack.click({ timeout: 5000 }).catch(() => {});
+    await pause(page, 800);
+  }
+  const agentClose = page.locator("flow-agent-panel").getByRole("button", { name: "Close", exact: true });
+  if (await agentClose.isVisible().catch(() => false)) {
+    await agentClose.click({ timeout: 5000 }).catch(() => {});
+    await pause(page, 800);
+  }
   await dismissOverlays(page);
   const root = page.url().match(/^https:\/\/[^/]+\/project\/[0-9a-f-]{36}/)?.[0];
   // Compared by path: an address ending in ?hl=en is already the grid.
@@ -776,7 +802,9 @@ export async function runGeneration(job: Job): Promise<string[]> {
 
   await ensureProjectGrid(page);
   const agent = page.getByRole("button", { name: "Agent", exact: true });
-  if ((await agent.getAttribute("aria-pressed")) === "true") await agent.click();
+  if (await agent.isVisible({ timeout: 1500 }).catch(() => false)) {
+    if ((await agent.getAttribute("aria-pressed").catch(() => null)) === "true") await agent.click().catch(() => {});
+  }
   const clear = page.getByRole("button", { name: "Clear prompt" });
   if (await clear.isVisible().catch(() => false)) await clear.click();
 

@@ -19,6 +19,7 @@ export interface AssembleOptions {
   voiceover?: string;
   output_name: string;
   hold_last_frame?: boolean;
+  still_seconds?: number;
 }
 
 interface ClipInfo {
@@ -199,14 +200,33 @@ export async function voiceTrack(lines: VoiceLine[], out: string): Promise<{ fil
   }
 }
 
+const STILL = /\.(jpe?g|png|webp)$/i;
+
+// A still image becomes a slow push-in clip, portrait 1080x1920 (YouTube Shorts), with silent sound so it joins the film
+// like any video. Flow's image tiles come down as stills, so a storyboard of images can be cut without any video credits.
+async function stillToClip(image: string, dir: string, seconds: number): Promise<string> {
+  const stills = join(dir, "_stills");
+  mkdirSync(stills, { recursive: true });
+  const target = join(stills, `${basename(image).replace(/\.\w+$/, "")}-${seconds}s.mp4`);
+  const frames = Math.round(seconds * 30);
+  await run(FFMPEG, [
+    "-y", "-i", image,
+    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+    "-vf", `scale=-2:1920,crop=1080:1920,zoompan=z='min(zoom+0.0008,1.12)':d=${frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=30,format=yuv420p`,
+    "-t", String(seconds), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k", "-shortest", target,
+  ]);
+  return target;
+}
+
 // Joins the scene clips into one film, keeping their own sound and laying music / voiceover on top.
 export async function assemble(o: AssembleOptions): Promise<{ output: string; clips: string[]; duration: number; held_last_frame: number }> {
   // Clips can now come from anywhere, so the project folder the film is saved into may not exist yet.
   if (o.clips?.length) mkdirSync(o.dir, { recursive: true });
   const out = join(o.dir, o.output_name.replace(/[^\w.-]+/g, "_").replace(/(\.mp4)?$/, ".mp4"));
-  const clips = (o.clips?.length ? o.clips : defaultClips(o.dir)).filter((c) => c !== out);
-  if (!clips.length) throw new Error(`No clips found in ${o.dir}. Generate or download a clip first, or pass clips explicitly.`);
-  for (const f of [...clips, o.music, o.voiceover]) if (f && !existsSync(f)) throw new Error(`File not found: ${f}`);
+  const picked = (o.clips?.length ? o.clips : defaultClips(o.dir)).filter((c) => c !== out);
+  if (!picked.length) throw new Error(`No clips found in ${o.dir}. Generate or download a clip first, or pass clips explicitly.`);
+  for (const f of [...picked, o.music, o.voiceover]) if (f && !existsSync(f)) throw new Error(`File not found: ${f}`);
+  const clips = await Promise.all(picked.map((c) => (STILL.test(c) ? stillToClip(c, o.dir, o.still_seconds ?? 5) : c)));
 
   let infos = await Promise.all(clips.map(probe));
   // A narration longer than the footage would be cut off, so the last frame is held until the voice finishes.
