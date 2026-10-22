@@ -1,3 +1,5 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -61,6 +63,13 @@ function sendMedia(req: IncomingMessage, res: ServerResponse, file: string) {
 
 export type ServerRole = "owner" | "client" | "none";
 
+// Builds an MCP server with every Flow tool; set by index.ts. /mcp uses it to serve the tools over Streamable HTTP,
+// so apps that cannot launch a local process (Hermes on Umbrel, for one) can still use Flow.
+let mcpFactory: (() => McpServer) | undefined;
+export function setMcpFactory(factory: () => McpServer): void {
+  mcpFactory = factory;
+}
+
 // Serves the Studio panel and a JSON API on localhost. Returns "client" when another flow-mcp process already
 // owns the port (that process owns the Flow tab and the queue), "none" when the port is taken by something else.
 export async function startServer(core: Core): Promise<ServerRole> {
@@ -96,8 +105,26 @@ export async function startServer(core: Core): Promise<ServerRole> {
         return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token));
       }
 
-      const given = req.headers["x-flow-token"] ?? url.searchParams.get("token");
+      // MCP clients usually send the token as "Authorization: Bearer <token>"; the panel and n8n use x-flow-token.
+      const bearer = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+      const given = req.headers["x-flow-token"] ?? bearer ?? url.searchParams.get("token");
       if (given !== token) return json(res, 401, { error: "Missing or wrong token." });
+
+      if (url.pathname === "/mcp") {
+        if (!mcpFactory) return json(res, 503, { error: "MCP over HTTP is not available in this process." });
+        // Stateless: each request gets its own server and transport. Long Flow work already answers with a task id
+        // within about 45 s, and flow_wait collects it, so no session needs to outlive a request.
+        const mcp = mcpFactory();
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+        res.on("close", () => {
+          void transport.close();
+          void mcp.close();
+        });
+        await mcp.connect(transport);
+        const raw = req.method === "POST" ? (await readBody(req, 4 * 1024 * 1024)).toString() : "";
+        await transport.handleRequest(req, res, raw ? JSON.parse(raw) : undefined);
+        return;
+      }
 
       if (req.method === "GET" && url.pathname === "/media") return sendMedia(req, res, url.searchParams.get("path") ?? "");
 
