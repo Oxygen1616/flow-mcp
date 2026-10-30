@@ -1195,7 +1195,7 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
       },
     } as Job);
     portrait = made[0];
-    c = { ...c, image: portrait };
+    c = { ...c, image: `asset:_cast-${c.name}` };
   }
   const image = c.image!;
   const projectUrl = page.url();
@@ -1237,9 +1237,27 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
     await page.getByRole("button", { name: "Add media", exact: true }).click();
   } else {
     if (!existsSync(image)) throw new Error(`File not found: ${image}`);
-    const chooser = page.waitForEvent("filechooser", { timeout: 10_000 });
-    await page.getByRole("button", { name: "Upload", exact: true }).click();
-    await (await chooser).setFiles(image);
+    const fileInput = page.locator('input[type="file"]');
+    if ((await fileInput.count().catch(() => 0)) > 0) {
+      await fileInput.first().setInputFiles(image).catch(() => {});
+    } else {
+      let chooser: any = null;
+      try {
+        const [c] = await Promise.all([
+          page.waitForEvent("filechooser", { timeout: 10_000 }).catch(() => null),
+          page.getByRole("button", { name: "Upload", exact: true }).click().catch(() => {}),
+        ]);
+        chooser = c;
+      } catch (e) {}
+      if (chooser) {
+        await chooser.setFiles(image).catch(() => {});
+      } else {
+        const fileInputAfter = page.locator('input[type="file"]');
+        if ((await fileInputAfter.count().catch(() => 0)) > 0) {
+          await fileInputAfter.first().setInputFiles(image).catch(() => {});
+        }
+      }
+    }
   }
   await page.waitForURL(/\/character\/[0-9a-f-]{36}/, { timeout: 90_000 });
   const url = page.url();
