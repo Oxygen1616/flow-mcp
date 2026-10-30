@@ -1205,9 +1205,18 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
   await openProjectNav(page, "Characters");
   await pause(page, 1500);
   // With no characters yet Flow jumps straight to the creation page.
-  const create = page.getByRole("button", { name: "New character" });
-  if (await create.isVisible().catch(() => false)) await create.click();
-  await page.waitForURL(/\/character$/, { timeout: 15_000 });
+  if (!/\/character(\/|\?|$)/.test(page.url())) {
+    const create = page.getByRole("button", { name: "New character" });
+    if (await create.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false)) {
+      await create.click();
+    }
+    await page.waitForURL(/\/character(\/|\?|$)/, { timeout: 30_000, waitUntil: "domcontentloaded" }).catch(() => {});
+  }
+  // Ensure the creation panel UI (Add from project or Upload button) is ready
+  await Promise.race([
+    page.getByRole("button", { name: "Add from project", exact: true }).waitFor({ state: "visible", timeout: 30_000 }),
+    page.getByRole("button", { name: "Upload", exact: true }).waitFor({ state: "visible", timeout: 30_000 }),
+  ]).catch(() => {});
 
   if (image.startsWith(ASSET_PREFIX)) {
     const title = image.slice(ASSET_PREFIX.length).trim();
