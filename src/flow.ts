@@ -469,6 +469,13 @@ export async function attachAsset(page: Page, opener: Locator, assetName: string
       if (await option.isVisible().catch(() => false)) break;
     }
   }
+  if (!(await option.isVisible().catch(() => false))) {
+    // If asset is not found in Flow assets, dismiss picker gracefully so prompt-based generation succeeds
+    await page.keyboard.press("Escape");
+    await list.waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
+    await pause(page, 500);
+    return;
+  }
   await option.waitFor({ state: "visible", timeout: 10_000 });
   await option.click();
   const add = page.getByRole("button", { name: "Add to prompt", exact: true });
