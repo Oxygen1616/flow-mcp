@@ -1202,7 +1202,8 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
       },
     } as Job);
     portrait = made[0];
-    c = { ...c, image: `asset:_cast-${c.name}` };
+    const assetStem = c.name.replace(/[^\w.-]+/g, "_");
+    c = { ...c, image: `asset:_cast-${assetStem}` };
   }
   const image = c.image!;
   const projectUrl = page.url();
@@ -1241,7 +1242,10 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
       throw new Error(`No image titled "${title}" in the Flow project. Use flow_assets to list titles.`);
     }
     await option.click();
-    await page.getByRole("button", { name: "Add media", exact: true }).click();
+    const addMedia = page.getByRole("button", { name: /Add( media| to character)?/i });
+    if (await addMedia.waitFor({ state: "visible", timeout: 2000 }).then(() => true).catch(() => false)) {
+      await addMedia.click().catch(() => {});
+    }
   } else {
     if (!existsSync(image)) throw new Error(`File not found: ${image}`);
     const fileInput = page.locator('input[type="file"]');
