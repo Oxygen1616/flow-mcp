@@ -383,7 +383,18 @@ async function applySettings(page: Page, job: Job): Promise<number> {
   if (model) await pickModel(page, model);
   if (s.type === "video" && s.resolution) await pickRadio(page, new RegExp(`^${s.resolution}`));
   if (s.type === "video" && s.duration) await pickRadio(page, `${s.duration}s`);
-  await pickRadio(page, `x${s.variants ?? 1}`);
+  if (s.type === "video" || s.variants) {
+    const variantName = `x${s.variants ?? 1}`;
+    const radio = page.getByRole("radio", { name: variantName, exact: true }).first();
+    if (await radio.isVisible().catch(() => false)) {
+      if (!(await radio.isChecked())) {
+        await radio.click();
+        await pause(page, 500);
+      }
+    } else if (s.variants && s.variants > 1) {
+      throw new Error(`Flow has no "${variantName}" option for the current mode/model.`);
+    }
+  }
   await pause(page, 600);
   const costText = await page.getByRole("link", { name: /credits?$/ }).innerText();
   const cost = Number(costText.match(/\d+/)?.[0] ?? NaN);
@@ -1233,9 +1244,15 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
     await list.waitFor({ state: "visible", timeout: 10_000 });
     let option = optionByName(list, title);
     if (!(await option.isVisible().catch(() => false))) {
-      await page.getByRole("tab", { name: "Uploads" }).click();
-      await pause(page, 1000);
-      option = optionByName(list, title);
+      for (const t of ["All", "Images", "Uploads"]) {
+        const tabBtn = page.getByRole("tab", { name: t });
+        if (await tabBtn.isVisible().catch(() => false)) {
+          await tabBtn.click().catch(() => {});
+          await pause(page, 800);
+          option = optionByName(list, title);
+          if (await option.isVisible().catch(() => false)) break;
+        }
+      }
     }
     if (!(await option.isVisible().catch(() => false))) {
       await page.keyboard.press("Escape");
@@ -1405,7 +1422,8 @@ async function setAgentSettings(page: Page, confirm: "Always" | "Never", imageAs
     await page.getByRole("radio", { name: new RegExp(`^${confirm}`) }).click();
     if (imageAspect) {
       await page.getByRole("radio", { name: imageAspect, exact: true }).first().click();
-      await page.getByRole("radio", { name: "x1", exact: true }).first().click();
+      const x1 = page.getByRole("radio", { name: "x1", exact: true }).first();
+      if (await x1.isVisible().catch(() => false)) await x1.click().catch(() => {});
       await pickAgentImageModel(page);
     }
     await pause(page, 300);
