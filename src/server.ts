@@ -7,7 +7,7 @@ import { basename, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { CACHE_DIR as CAPTIONS_DIR } from "./captions.js";
-import { HOME_DIR } from "./chrome.js";
+import { getFlowPage, HOME_DIR } from "./chrome.js";
 import { OUTPUT_ROOT, shapes, type Core } from "./core.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
@@ -127,6 +127,32 @@ export async function startServer(core: Core): Promise<ServerRole> {
       }
 
       if (req.method === "GET" && url.pathname === "/media") return sendMedia(req, res, url.searchParams.get("path") ?? "");
+
+      if (req.method === "GET" && url.pathname === "/api/inspect") {
+        const page = await getFlowPage();
+        const action = url.searchParams.get("action");
+        if (action === "chars") {
+          const navBtn = page.getByRole("navigation", { name: "Project navigation" }).locator("button, a").filter({ hasText: /Characters\s*$/ }).first();
+          if (await navBtn.isVisible().catch(() => false)) await navBtn.click({ timeout: 5000 }).catch(() => {});
+          await new Promise(r => setTimeout(r, 2000));
+        }
+        const screenshotPath = join(OUTPUT_ROOT, "inspect.png");
+        await page.screenshot({ path: screenshotPath }).catch(() => {});
+        const dom = await page.evaluate(() => {
+          return {
+            url: window.location.href,
+            title: document.title,
+            elements: [...document.querySelectorAll("button, a, [role='button'], flow-character-tile, flow-grid-tile-container, mat-card")].map((el) => ({
+              tag: el.tagName,
+              role: el.getAttribute("role"),
+              aria: el.getAttribute("aria-label"),
+              text: (el as HTMLElement).innerText?.replace(/\s+/g, " ").trim(),
+              visible: (el as HTMLElement).offsetParent !== null,
+            })).filter((x) => x.visible && (x.text || x.aria)),
+          };
+        }).catch((e) => ({ error: String(e) }));
+        return json(res, 200, { dom, screenshot: screenshotPath });
+      }
 
       if (req.method === "POST" && url.pathname === "/api/upload") {
         const name = basename(url.searchParams.get("name") ?? "upload").replace(/[^\w.-]+/g, "_");
