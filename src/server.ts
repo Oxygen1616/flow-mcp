@@ -139,18 +139,6 @@ export async function startServer(core: Core): Promise<ServerRole> {
         const screenshotPath = join(OUTPUT_ROOT, "inspect.png");
         await page.screenshot({ path: screenshotPath }).catch(() => {});
         const dom = await page.evaluate(() => {
-          const mainHtml = document.querySelector("main")?.innerHTML || document.body.innerHTML;
-          return {
-            url: window.location.href,
-            title: document.title,
-            mainSnippet: mainHtml.slice(0, 5000),
-            allButtons: [...document.querySelectorAll("button, [role=button], a")].map(b => ({
-              tag: b.tagName,
-              aria: b.getAttribute("aria-label"),
-              text: (b as HTMLElement).innerText?.replace(/\s+/g, " ").trim(),
-              title: b.getAttribute("title")
-            })),
-
           return {
             url: window.location.href,
             title: document.title,

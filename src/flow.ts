@@ -1221,25 +1221,75 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
   await dismissOverlays(page);
   await scrollToTop(page);
 
+  await leaveCharacterEditor(page).catch(() => {});
   await openProjectNav(page, "Characters");
   await pause(page, 1500);
-  // With no characters yet Flow jumps straight to the creation page.
+
+  // If not already in the character creation view:
   if (!/\/character(\/|\?|$)/.test(page.url())) {
-    const create = page.getByRole("button", { name: "New character" });
-    if (await create.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false)) {
-      await create.click();
+    // 1. Try empty-state "New character" button or tile
+    const newCharBtn = page
+      .getByRole("button", { name: /new character/i })
+      .or(page.locator("flow-character-tile").filter({ hasText: /new/i }))
+      .first();
+    let entered = false;
+    if (await newCharBtn.isVisible().catch(() => false)) {
+      await newCharBtn.click().catch(() => {});
+      entered = true;
     }
-    await page.waitForURL(/\/character(\/|\?|$)/, { timeout: 30_000, waitUntil: "domcontentloaded" }).catch(() => {});
+
+    // 2. If not entered, click top "+" ("Add media menu") and pick "Character"
+    if (!entered) {
+      const addMenuBtn = page.getByRole("button", { name: "Add media menu" }).first();
+      if (await addMenuBtn.isVisible().catch(() => false)) {
+        await addMenuBtn.click().catch(() => {});
+        await pause(page, 600);
+        const charItem = page
+          .getByRole("menuitem", { name: /character/i })
+          .or(page.locator(".cdk-overlay-pane button, [role='menu'] button, [role='menuitem']").filter({ hasText: /character/i }))
+          .first();
+        if (await charItem.isVisible().catch(() => false)) {
+          await charItem.click().catch(() => {});
+          entered = true;
+        } else {
+          await page.keyboard.press("Escape").catch(() => {});
+        }
+      }
+    }
+
+    // 3. Fallback: navigate directly to /project/<id>/character
+    if (!/\/character(\/|\?|$)/.test(page.url())) {
+      const projMatch = projectUrl.match(/\/project\/[0-9a-f-]+/);
+      if (projMatch) {
+        await page.goto(inEnglish(`https://flow.google.com${projMatch[0]}/character`), { waitUntil: "domcontentloaded" }).catch(() => {});
+      }
+    }
+
+    await page.waitForURL(/\/character(\/|\?|$)/, { timeout: 20_000, waitUntil: "domcontentloaded" }).catch(() => {});
   }
+
   // Ensure the creation panel UI (Add from project or Upload button) is ready
+  const addFromProject = page
+    .getByRole("button", { name: /Add from project/i })
+    .or(page.locator("button, [role='button']").filter({ hasText: /Add from project/i }))
+    .first();
+  const uploadBtn = page
+    .getByRole("button", { name: /^Upload$/i })
+    .or(page.locator("button, [role='button']").filter({ hasText: /^Upload$/i }))
+    .first();
+
   await Promise.race([
-    page.getByRole("button", { name: "Add from project", exact: true }).waitFor({ state: "visible", timeout: 30_000 }),
-    page.getByRole("button", { name: "Upload", exact: true }).waitFor({ state: "visible", timeout: 30_000 }),
+    addFromProject.waitFor({ state: "visible", timeout: 20_000 }),
+    uploadBtn.waitFor({ state: "visible", timeout: 20_000 }),
   ]).catch(() => {});
 
   if (image.startsWith(ASSET_PREFIX)) {
     const title = image.slice(ASSET_PREFIX.length).trim();
-    await page.getByRole("button", { name: "Add from project", exact: true }).click();
+    if (await addFromProject.isVisible().catch(() => false)) {
+      await addFromProject.click();
+    } else {
+      await page.getByRole("button", { name: "Add from project", exact: true }).click();
+    }
     const list = page.getByRole("listbox", { name: "Asset list" });
     await list.waitFor({ state: "visible", timeout: 10_000 });
     let option = optionByName(list, title);
