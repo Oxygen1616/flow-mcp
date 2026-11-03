@@ -248,6 +248,10 @@ type MediaKind = "image" | "video";
 //   still processing and only gets its final id a moment later, after the "before" snapshot, so it read as new;
 // - a tile of the wrong kind, such as the still that "Save frame" makes on the way to a continuation clip;
 // - a tile still rendering ("NN%").
+// Moved to top for freshMedia semantic matching
+const STOP_WORDS = new Set("the and with from into over under that this then than are was for her his its their onto next near across wide shot close scene image".split(" "));
+const words = (text: string) => new Set(text.toLowerCase().match(/[a-z0-9']{3,}/g)?.filter((w) => !STOP_WORDS.has(w)) ?? []);
+
 export async function freshMedia(page: Page, before: string[], kind?: MediaKind, job?: Job): Promise<string[]> {
   const isCast = job?.params.output_dir?.endsWith("_cast") || job?.params.file_stem?.startsWith("_cast");
   const targetAspect = job?.params.aspect_ratio;
@@ -292,6 +296,14 @@ export async function freshMedia(page: Page, before: string[], kind?: MediaKind,
 
     // 3. Foreign Project Isolation: If a tile is already renamed to another project's stem, it's not ours
     if (projectBase && t.label.includes("-scene-") && !t.label.startsWith(projectBase)) return false;
+    // 4. Prompt Semantic Fingerprinting (differentiates concurrent productions with identical aspect ratio)
+    if (job?.params.prompt && t.label && !t.label.startsWith("title:")) {
+      const wantWords = words(job.params.prompt);
+      const haveWords = words(t.label);
+      let hits = 0;
+      for (const w of wantWords) { if (haveWords.has(w)) hits++; }
+      if (haveWords.size >= 3 && wantWords.size >= 3 && hits === 0) return false;
+    }
 
     return true;
   });
@@ -1529,8 +1541,7 @@ async function closeAgentSession(page: Page): Promise<void> {
   await pause(page, 400);
 }
 
-const STOP_WORDS = new Set("the and with from into over under that this then than are was for her his its their onto next near across wide shot close scene image".split(" "));
-const words = (text: string) => new Set(text.toLowerCase().match(/[a-z0-9']{3,}/g)?.filter((w) => !STOP_WORDS.has(w)) ?? []);
+// (words helper moved up for freshMedia)
 
 // Returns, per scene, the indexes of the tiles that belong to it (best match first). A tile counts when at least
 // half of the scene's meaningful words appear in the prompt Flow stored for that tile.
