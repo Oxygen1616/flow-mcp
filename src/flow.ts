@@ -248,27 +248,54 @@ type MediaKind = "image" | "video";
 //   still processing and only gets its final id a moment later, after the "before" snapshot, so it read as new;
 // - a tile of the wrong kind, such as the still that "Save frame" makes on the way to a continuation clip;
 // - a tile still rendering ("NN%").
-export async function freshMedia(page: Page, before: string[], kind?: MediaKind): Promise<string[]> {
+export async function freshMedia(page: Page, before: string[], kind?: MediaKind, job?: Job): Promise<string[]> {
+  const isCast = job?.params.output_dir?.endsWith("_cast") || job?.params.file_stem?.startsWith("_cast");
+  const targetAspect = job?.params.aspect_ratio;
+  const projectBase = job?.params.output_dir ? basename(job.params.output_dir) : "";
+
   const tiles = await page.evaluate(
     (js) => {
       const idOf = eval(js) as (t: Element) => string | undefined;
-      return [...document.querySelectorAll("flow-grid-tile-container")].map((t) => ({
-        id: idOf(t),
-        kind: t.querySelector("flow-video-tile") ? "video" : t.querySelector("flow-image-tile") ? "image" : "other",
-        label: t.getAttribute("aria-label") ?? "",
-        // For the first seconds after Start generation, before any "NN%" shows, a new video tile is titled with the
-        // prompt itself and has no thumbnail; then it takes a short title of Flow's own and counts up; finished, it
-        // has its thumbnail (watched live 2026-10-16, a 4 s clip: prompt title at 9 s, "0%" at 12 s, 100% at 34 s,
-        // thumbnail at 35 s). The old test - no "NN%" means done - took the tile in those first seconds and lost a
-        // user's clip. A video without its thumbnail counts as busy.
-        busy:
-          /\d+%/.test((t as HTMLElement).innerText) ||
-          (!!t.querySelector("flow-video-tile") && !t.querySelector('img[alt="Generated video thumbnail"], video')),
-      }));
+      return [...document.querySelectorAll("flow-grid-tile-container")].map((t) => {
+        const rect = t.getBoundingClientRect();
+        return {
+          id: idOf(t),
+          kind: t.querySelector("flow-video-tile") ? "video" : t.querySelector("flow-image-tile") ? "image" : "other",
+          label: t.getAttribute("aria-label") ?? "",
+          width: rect.width,
+          height: rect.height,
+          busy:
+            /\d+%/.test((t as HTMLElement).innerText) ||
+            (!!t.querySelector("flow-video-tile") && !t.querySelector('img[alt="Generated video thumbnail"], video')),
+        };
+      });
     },
     TILE_ID_JS,
   );
-  const ours = tiles.filter((t) => t.id && !before.includes(t.id) && !t.label.startsWith("fm-") && !t.busy && (!kind || t.kind === kind));
+
+  const ours = tiles.filter((t) => {
+    if (!t.id || before.includes(t.id) || t.label.startsWith("fm-") || t.busy) return false;
+    if (kind && t.kind !== kind) return false;
+
+    // 1. Cast vs Scene separation:
+    const labelIsCast = t.label.startsWith("_cast-") || t.label.startsWith("_cast");
+    if (!isCast && labelIsCast) return false; // Scene jobs must NEVER pick up a cast portrait tile!
+    if (isCast && !labelIsCast && t.label.length > 0 && !t.label.includes(job?.params.file_stem ?? "")) {
+      if (t.label.includes("-scene-")) return false;
+    }
+
+    // 2. Aspect Ratio Validation (prevent 16:9 widescreen scenes from taking 3:4/9:16 portrait images)
+    if (t.width > 0 && t.height > 0) {
+      if (targetAspect === "16:9" && t.height > t.width * 0.9) return false; // 16:9 must be landscape!
+      if ((targetAspect === "9:16" || targetAspect === "3:4") && t.width > t.height * 0.9) return false; // 9:16 / 3:4 must be portrait!
+    }
+
+    // 3. Foreign Project Isolation: If a tile is already renamed to another project's stem, it's not ours
+    if (projectBase && t.label.includes("-scene-") && !t.label.startsWith(projectBase)) return false;
+
+    return true;
+  });
+
   return [...new Set(ours.map((t) => t.id!))];
 }
 
@@ -279,7 +306,7 @@ async function waitForNewMedia(page: Page, before: string[], count: number, time
   let seen = "";
   while (Date.now() < deadline) {
     await pause(page, 2000);
-    const fresh = await freshMedia(page, before, kind);
+    const fresh = await freshMedia(page, before, kind, job);
     // New tiles are listed first, so anything beyond the requested count is not ours.
     if (fresh.length >= count) {
       const picked = fresh.slice(0, count);

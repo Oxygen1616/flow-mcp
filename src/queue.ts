@@ -76,7 +76,7 @@ export class JobQueue {
   }
 
   get busy(): boolean {
-    return this.list().some((j) => j.status === "running");
+    return this.working || this.list().some((j) => j.status === "running" || j.status === "queued");
   }
 
   get(id: string): Job | undefined {
