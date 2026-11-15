@@ -56,6 +56,8 @@ async function launchChrome(): Promise<void> {
     `--user-data-dir=${PROFILE_DIR}`,
     `--remote-debugging-port=${CDP_PORT}`,
     "--disable-extensions",
+    "--disable-brave-extension",
+    "--disable-blink-features=AutomationControlled",
     "--no-first-run",
     "--no-default-browser-check",
     inEnglish(FLOW_URL),
@@ -83,6 +85,28 @@ export async function getBrowser(): Promise<Browser> {
   return browser;
 }
 
+const stealthedPages = new WeakSet<Page>();
+
+async function ensureStealth(page: Page): Promise<void> {
+  if (stealthedPages.has(page)) return;
+  stealthedPages.add(page);
+  const stealthScript = `(() => {
+    try {
+      if (navigator.webdriver) {
+        Object.defineProperty(Navigator.prototype, 'webdriver', {
+          get: () => false,
+          configurable: true
+        });
+      }
+    } catch {}
+  })();`;
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: stealthScript }).catch(() => {});
+  } catch {}
+  await page.evaluate(stealthScript).catch(() => {});
+}
+
 export async function getFlowPage(): Promise<Page> {
   const b = await getBrowser();
   let context = b.contexts()[0];
@@ -90,15 +114,18 @@ export async function getFlowPage(): Promise<Page> {
   const pages = context.pages();
   const projectPage = pages.find((p) => /\/project\//.test(p.url()));
   if (projectPage) {
+    await ensureStealth(projectPage);
     await ensureEnglish(projectPage);
     return projectPage;
   }
   const existing = pages.find((p) => FLOW_HOSTS.test(p.url()));
   if (existing) {
+    await ensureStealth(existing);
     await ensureEnglish(existing);
     return existing;
   }
   const page = await context.newPage();
+  await ensureStealth(page);
   await page.goto(inEnglish(FLOW_URL), { waitUntil: "domcontentloaded" });
   await ensureEnglish(page);
   return page;
