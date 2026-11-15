@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { assemble, localVoices, speakLocally, voiceTrack } from "./assemble.js";
-import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakWithGemini } from "./gemini.js";
+import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakBatchWithGemini, speakWithGemini } from "./gemini.js";
 import { KOKORO_VOICES, kokoroReady, speakWithKokoro } from "./kokoro.js";
 import { extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
@@ -173,10 +173,22 @@ export const shapes = {
       .describe(
         "'gemini' uses Google AI Studio's text-to-speech - the same voices Flow has, free on the AI Studio tier, no length limit, needs a key in ~/.flow-mcp/gemini-key. 'mac' uses a voice installed on this computer (macOS voices on a Mac, the built-in speech voices on Windows): free, instant, no key. 'kokoro' runs the local Kokoro model (voice am_puck etc.): free, offline, no key, needs Python with kokoro-onnx and the model in ~/.flow-mcp/kokoro.",
       ),
-    text: z.string().min(1).max(400).describe("The line to speak. About 20 words fits 8 s, 30 words fits 12 s; anything longer needs a longer take."),
+    text: z.string().min(1).max(4000).describe("The line to speak. About 20 words fits 8 s, 30 words fits 12 s; anything longer needs a longer take."),
     voice: z.string().min(1).default("Charon").describe("Voice name from flow_voices, e.g. Charon (informative), Aoede (breezy), Gacrux (mature) for Google; Zoe or Samantha for macOS; am_puck or af_heart for Kokoro."),
-    style: z.string().max(200).optional().describe("Delivery note for the 'gemini' engine, e.g. 'slowly and warmly, like a documentary narrator'."),
+    style: z.string().max(500).optional().describe("Delivery note for the 'gemini' engine, e.g. 'slowly and warmly, like a documentary narrator'."),
     speed: z.number().min(0.5).max(1.5).optional().describe("Speaking speed for the 'kokoro' engine, 1 = normal. Default 0.85, which suits comedy timing."),
+  },
+  narrate_batch: {
+    project: z.string().min(1).describe("Folder for the batch narration audio files (narration-01.m4a .. narration-NN.m4a)."),
+    scenes: z.array(z.string().min(1)).min(1).max(100).describe("Scene narration texts in story order."),
+    voice: z.string().min(1).default("Rasalgethi").describe("Gemini prebuilt voice name (e.g. 'Rasalgethi', 'Aoede', 'Charon')."),
+    style: z
+      .string()
+      .max(500)
+      .optional()
+      .describe("Delivery/accent/cadence prompt for Gemini TTS, e.g. 'Read it in a warm storytelling Nigerian accent with natural Nigerian Pidgin cadence, informative, middle pitch'."),
+    chunk_size: z.number().int().min(1).max(10).default(5).describe("How many scenes to combine per Gemini TTS API call before splitting into individual scene files."),
+    timeout_seconds: z.number().int().min(5).max(300).default(40).describe("Max seconds to wait before returning current batch progress."),
   },
   edit: {
     project: z.string().min(1).describe("Local folder for the edited clip."),
@@ -285,6 +297,7 @@ export interface Core {
   techniques(a: Args<"techniques">): Promise<unknown>;
   voices(): Promise<unknown>;
   narrate(a: Args<"narrate">): Promise<unknown>;
+  narrate_batch(a: Args<"narrate_batch">): Promise<unknown>;
   character(a: Args<"character">): Promise<unknown>;
   characters(): Promise<unknown>;
   character_edit(a: Args<"character_edit">): Promise<unknown>;
@@ -646,6 +659,18 @@ export class LocalCore implements Core {
           ? await speakWithKokoro(text.trim(), voice, target, speed)
           : await speakWithGemini(text.trim(), voice, target, style);
     return { output_dir, credits: 0, engine, voice, ...spoken };
+  }
+
+  async narrate_batch({ project, scenes, voice, style, chunk_size, timeout_seconds }: Args<"narrate_batch">) {
+    const output_dir = projectDir(project);
+    return speakBatchWithGemini({
+      outputDir: output_dir,
+      scenes: scenes.map((s) => s.trim()),
+      voice,
+      style,
+      chunkSize: chunk_size,
+      timeoutSeconds: timeout_seconds,
+    });
   }
 
   async techniques({ category }: Args<"techniques">) {
