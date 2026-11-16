@@ -63,7 +63,11 @@ export function extractZip(zip: string, dest: string): string[] {
   try {
     execFileSync("tar", ["-xf", zip, "-C", dest], { stdio: "ignore" });
   } catch {
-    execFileSync("unzip", ["-o", "-q", zip, "-d", dest], { stdio: "ignore" });
+    try {
+      execFileSync("unzip", ["-o", "-q", zip, "-d", dest], { stdio: "ignore" });
+    } catch {
+      execFileSync("python3", ["-m", "zipfile", "-e", zip, dest], { stdio: "ignore" });
+    }
   }
   const files: string[] = [];
   const walk = (dir: string) => {

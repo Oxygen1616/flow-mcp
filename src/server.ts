@@ -90,7 +90,7 @@ export async function startServer(core: Core): Promise<ServerRole> {
   const server = createServer(async (req, res) => {
     try {
       // The Host check blocks DNS-rebinding; the token blocks other local pages from driving the queue.
-      if (!allowedHosts.has(req.headers.host ?? "")) return json(res, 403, { error: "Bad host." });
+      if (!allowAnyHost && !allowedHosts.has(req.headers.host ?? "")) return json(res, 403, { error: "Bad host." });
       const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 
       if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { name: "flow-mcp" });

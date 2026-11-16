@@ -51,6 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     libsndfile1 \
     libgomp1 \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # The container runs as root, which Chromium refuses without --no-sandbox; Debian's chromium wrapper reads this file.
