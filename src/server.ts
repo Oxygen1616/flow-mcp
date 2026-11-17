@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { CACHE_DIR as CAPTIONS_DIR } from "./captions.js";
 import { getFlowPage, HOME_DIR } from "./chrome.js";
+import { clearErrorTiles } from "./flow.js";
 import { OUTPUT_ROOT, shapes, type Core } from "./core.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
@@ -135,6 +136,10 @@ export async function startServer(core: Core): Promise<ServerRole> {
           const navBtn = page.getByRole("navigation", { name: "Project navigation" }).locator("button, a").filter({ hasText: /Characters\s*$/ }).first();
           if (await navBtn.isVisible().catch(() => false)) await navBtn.click({ timeout: 5000 }).catch(() => {});
           await new Promise(r => setTimeout(r, 2000));
+        } else if (action === "clear_errors") {
+          await clearErrorTiles(page).catch(() => {});
+          await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+          await new Promise(r => setTimeout(r, 3000));
         }
         const screenshotPath = join(OUTPUT_ROOT, "inspect.png");
         await page.screenshot({ path: screenshotPath }).catch(() => {});

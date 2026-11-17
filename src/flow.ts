@@ -338,11 +338,50 @@ export async function freshMedia(page: Page, before: string[], kind?: MediaKind,
   return [...new Set(ours.map((t) => t.id!))];
 }
 
-async function waitForNewMedia(page: Page, before: string[], count: number, timeoutMs: number, job?: Job, kind?: MediaKind): Promise<string[]> {
+async function errorReason(page: Page): Promise<string> {
+  return page
+    .locator(ERROR_TILE_SELECTOR)
+    .first()
+    .evaluate((el) => ((el.querySelector(".error-message-text") as HTMLElement | null)?.innerText || (el as HTMLElement).innerText).replace(/\s+/g, " ").trim())
+    .catch(() => "");
+}
+const POLICY = /polic|violat|prominent|safety|not allowed|guideline/i;
+
+// Removes leftover failed tiles at the top of the grid so they never poison subsequent scene checks.
+export async function clearErrorTiles(page: Page, known: Iterable<string> = []): Promise<number> {
+  let removed = 0;
+  await scrollToTop(page).catch(() => {});
+  for (let i = 0; i < 30; i++) {
+    const count = await newErrorTiles(page, known).catch(() => 0);
+    if (!count) break;
+    const errTile = page.locator(ERROR_TILE_SELECTOR).first();
+    if (!(await errTile.isVisible().catch(() => false))) break;
+    await errTile.scrollIntoViewIfNeeded().catch(() => {});
+    await hoverTile(page, errTile, 250).catch(() => {});
+    const delBtn = errTile.getByRole("button", { name: "Delete" }).first();
+    if (await delBtn.isVisible().catch(() => false)) {
+      await delBtn.click({ timeout: 4000 }).catch(() => {});
+      removed++;
+    } else {
+      const anyDel = errTile.locator('button[aria-label*="Delete" i], button:has-text("delete_forever")').first();
+      if (await anyDel.count().catch(() => 0)) {
+        await anyDel.click({ force: true, timeout: 4000 }).catch(() => {});
+        removed++;
+      } else {
+        break;
+      }
+    }
+    await pause(page, 700);
+  }
+  return removed;
+}
+
+async function waitForNewMedia(page: Page, before: string[], count: number, timeoutMs: number, job?: Job, kind?: MediaKind, baselineErrors = 0): Promise<string[]> {
   const deadline = Date.now() + timeoutMs;
   let retriesLeft = job?.params.retries ?? 1;
   let failures = 0;
   let seen = "";
+  let knownErrors = baselineErrors;
   while (Date.now() < deadline) {
     await pause(page, 2000);
     const fresh = await freshMedia(page, before, kind, job);
@@ -361,17 +400,30 @@ async function waitForNewMedia(page: Page, before: string[], count: number, time
       [...document.querySelectorAll("flow-grid-tile-container")].slice(0, 8).map((t) => (t as HTMLElement).innerText.match(/\d+%/)?.[0]).filter(Boolean),
     );
     if (job) job.progress = progress.join(", ") || undefined;
-    const errors = progress.length ? 0 : await newErrorTiles(page, before);
+    const totalErrors = progress.length ? knownErrors : await newErrorTiles(page, before);
+    const errors = Math.max(0, totalErrors - knownErrors);
     if (!errors) continue;
     failures += errors;
+    const reason = await errorReason(page);
+    if (POLICY.test(reason)) {
+      await clearErrorTiles(page, before).catch(() => {});
+      const hint = /prominent|public figure|celebrit/i.test(reason)
+        ? " Flow thinks a face in this scene looks like a real, well-known person. Retrying will not change that: use a character drawn from a description instead."
+        : " Retrying the same prompt will not change that.";
+      throw new Error(`Flow refused this generation on policy grounds: "${reason}" Nothing was charged.${hint}`);
+    }
     if (retriesLeft > 0) {
       retriesLeft--;
       if (job) job.progress = "Flow failed, retrying";
       const retried = await retryErrorTile(page, page.locator(ERROR_TILE_SELECTOR).first());
-      if (retried) continue;
+      if (retried) {
+        knownErrors = await newErrorTiles(page, before).catch(() => knownErrors);
+        continue;
+      }
     }
     if (fresh.length) return fresh;
-    throw new Error(`Flow failed this generation ${failures} time(s) ("Sorry, this image/video failed to generate"). Nothing was charged. Try again later or reword the prompt.`);
+    await clearErrorTiles(page, before).catch(() => {});
+    throw new Error(`Flow failed this generation ${failures} time(s) (${reason ? `"${reason.slice(0, 160)}"` : '"Sorry, this image/video failed to generate"'}). Nothing was charged. Try again later or reword the prompt.`);
   }
   throw new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s waiting for Flow to finish.`);
 }
@@ -560,26 +612,14 @@ export async function attachAsset(page: Page, opener: Locator, assetName: string
 
 async function typePrompt(page: Page, prompt: string): Promise<void> {
   const box = page.locator(".ProseMirror").first();
-  await hoverTile(page, box, 250);
   await box.click();
-  await pause(page, 200 + Math.floor(Math.random() * 200));
   await page.keyboard.press("ControlOrMeta+a");
-  await page.keyboard.press("Backspace");
-  await pause(page, 180 + Math.floor(Math.random() * 150));
-  // Enter submits in Flow, so the prompt goes in as a single line.
-  // Insert the main body and type the final characters with natural human keystroke jitter to satisfy BotGuard.
+  await page.keyboard.press("Delete");
+  // Enter submits in Flow, so the prompt goes in as a single line typed with real keystrokes (never CDP insertText,
+  // which fires 0 keydown events and triggers BotGuard's unusual activity / extension warning).
   const clean = prompt.replace(/\s*\n+\s*/g, " ").trim();
-  const tailLen = Math.min(clean.length, 6);
-  const head = clean.slice(0, clean.length - tailLen);
-  const tail = clean.slice(clean.length - tailLen);
-  if (head) {
-    await page.keyboard.insertText(head);
-    await pause(page, 220 + Math.floor(Math.random() * 250));
-  }
-  for (const ch of tail) {
-    await page.keyboard.type(ch, { delay: 45 + Math.floor(Math.random() * 75) });
-  }
-  await pause(page, 650 + Math.floor(Math.random() * 450));
+  await page.keyboard.type(clean, { delay: 8 });
+  await pause(page, 600);
 }
 
 export type DownloadQuality = "original" | "upscaled";
@@ -1250,11 +1290,12 @@ export async function runGeneration(job: Job): Promise<string[]> {
   if (!(await start.isEnabled())) throw new Error("Flow's Start generation button is disabled; the prompt or inputs were not accepted.");
   await scrollToTop(page);
   const before = await mediaIds(page);
-  await hoverTile(page, start, 320 + Math.floor(Math.random() * 250));
+  await clearErrorTiles(page, before).catch(() => {});
+  const baselineErrors = await newErrorTiles(page, before).catch(() => 0);
   await start.click();
 
   const variants = s.variants ?? 1;
-  const fresh = await waitForNewMedia(page, before, variants, s.type === "image" ? IMAGE_TIMEOUT_MS : VIDEO_TIMEOUT_MS, job, s.type === "image" ? "image" : "video");
+  const fresh = await waitForNewMedia(page, before, variants, s.type === "image" ? IMAGE_TIMEOUT_MS : VIDEO_TIMEOUT_MS, job, s.type === "image" ? "image" : "video", baselineErrors);
   job.progress = undefined;
 
   mkdirSync(s.output_dir, { recursive: true });
@@ -1975,6 +2016,7 @@ async function agentRound(
   const base = Number(s.file_stem.match(/\d+/)?.[0] ?? 1);
   const numberOf = (i: number) => s.agent_numbers?.[i] ?? base + i;
   await ensureProjectGrid(page);
+  await clearErrorTiles(page).catch(() => {});
   const seenBefore = await scanGrid(page);
   // Ids are unique per generation; titles are not (the agent reuses wording), so only id-less tiles fall back to a name.
   const before = new Set<string>(seenBefore.map((a) => a.id).filter((v): v is string => Boolean(v)));
@@ -2014,7 +2056,7 @@ async function agentRound(
     : `Generate exactly ${indexes.length} separate images, one image per scene, in scene order`;
   const ask = `${lead}. Images only, never video. ${aspect} aspect ratio. Do not ask questions, generate them now.${legend} ${script}`;
   await page.locator(".ProseMirror").first().click();
-  await page.keyboard.insertText(ask);
+  await page.keyboard.type(ask, { delay: 6 });
   await pause(page, 800);
   const start = page.getByRole("button", { name: "Start generation" });
   if (!(await start.isEnabled())) throw new Error("Flow's agent did not accept the script (Start generation stayed disabled).");
