@@ -50,7 +50,8 @@ export async function speakWithKokoro(text: string, voice: string, target: strin
     await run(PYTHON, [SCRIPT, MODEL_DIR, textFile, raw, voice, String(speed)], { timeout: 300_000 }).catch((err: NodeJS.ErrnoException & { stderr?: string }) => {
       throw new Error(`Kokoro could not speak this line. Is Python with kokoro-onnx and soundfile installed? (${(err.stderr ?? err.message).trim().split("\n").pop()})`);
     });
-    await run(FFMPEG, ["-y", "-i", raw, "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "48000", "-ac", "2", target]);
+    const audioFilter = "highpass=f=80,silenceremove=start_periods=1:start_duration=0.01:start_threshold=-42dB,areverse,silenceremove=start_periods=1:start_duration=0.01:start_threshold=-42dB,areverse,apad=pad_dur=0.03,loudnorm=I=-16:TP=-1.5:LRA=11";
+    await run(FFMPEG, ["-y", "-i", raw, "-af", audioFilter, "-ar", "48000", "-ac", "2", target]);
   } finally {
     rmSync(textFile, { force: true });
     rmSync(raw, { force: true });

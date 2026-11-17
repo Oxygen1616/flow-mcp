@@ -135,9 +135,11 @@ async function fetchGeminiPcm(prompt: string, voice: string, key: string): Promi
 async function encodePcmToTarget(pcm: Buffer, rate: number, target: string): Promise<{ output: string; duration: number }> {
   const raw = target.replace(/\.\w+$/, "") + ".pcm";
   writeFileSync(raw, pcm);
+  // Strip leading and trailing silence so voice starts instantly at 0.0s with no pause between scenes
+  const audioFilter = "highpass=f=80,silenceremove=start_periods=1:start_duration=0.01:start_threshold=-42dB,areverse,silenceremove=start_periods=1:start_duration=0.01:start_threshold=-42dB,areverse,apad=pad_dur=0.03,loudnorm=I=-16:TP=-1.5:LRA=11";
   await run(FFMPEG, [
     "-y", "-f", "s16le", "-ar", String(rate), "-ac", "1", "-i", raw,
-    "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "48000", "-ac", "2", target,
+    "-af", audioFilter, "-ar", "48000", "-ac", "2", target,
   ]);
   const { stdout } = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", target]);
   const duration = Number(stdout.trim());

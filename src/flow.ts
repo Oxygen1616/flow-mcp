@@ -1244,6 +1244,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
   const s = job.params;
 
   await ensureProjectGrid(page);
+  await clearErrorTiles(page).catch(() => {});
   const agent = page.getByRole("button", { name: "Agent", exact: true });
   if (await agent.isVisible({ timeout: 1500 }).catch(() => false)) {
     if ((await agent.getAttribute("aria-pressed").catch(() => null)) === "true") await agent.click().catch(() => {});
@@ -1290,7 +1291,6 @@ export async function runGeneration(job: Job): Promise<string[]> {
   if (!(await start.isEnabled())) throw new Error("Flow's Start generation button is disabled; the prompt or inputs were not accepted.");
   await scrollToTop(page);
   const before = await mediaIds(page);
-  await clearErrorTiles(page, before).catch(() => {});
   const baselineErrors = await newErrorTiles(page, before).catch(() => 0);
   await start.click();
 
