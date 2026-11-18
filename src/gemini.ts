@@ -3,7 +3,6 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { HOME_DIR } from "./chrome.js";
-import { kokoroReady, speakWithKokoro } from "./kokoro.js";
 
 const run = promisify(execFile);
 const FFMPEG = process.env.FLOW_MCP_FFMPEG ?? "ffmpeg";
@@ -111,6 +110,10 @@ async function fetchGeminiPcm(prompt: string, voice: string, key: string): Promi
     };
     if (!res.ok) {
       const msg = body.error?.message ?? "no detail";
+      const isDailyQuota = /daily|per day|limit exceeded on Free Tier/i.test(msg);
+      if (isDailyQuota) {
+        throw new Error(`Google AI Studio Free Tier daily limit (10 audio requests/day) exceeded: ${msg}. Please provide a fresh Gemini API key or enable billing on Google AI Studio.`);
+      }
       if ((res.status === 429 || res.status >= 500) && attempt < maxAttempts) {
         const isQuota = /quota|resource_exhausted/i.test(msg);
         if (isQuota && attempt >= 2) {
@@ -118,7 +121,7 @@ async function fetchGeminiPcm(prompt: string, voice: string, key: string): Promi
         }
         const matchSec = msg.match(/retry in (\d+(?:\.\d+)?)s/i);
         const waitMs = matchSec ? Math.ceil(Number(matchSec[1]) * 1000) + 1000 : attempt * 8000;
-        await new Promise((r) => setTimeout(r, Math.min(waitMs, isQuota ? 12000 : 25000)));
+        await new Promise((r) => setTimeout(r, Math.min(waitMs, isQuota ? 8000 : 20000)));
         continue;
       }
       throw new Error(`Gemini TTS refused this take (${res.status}): ${msg}`);
@@ -315,31 +318,17 @@ export async function speakBatchWithGemini(opts: {
           const chunkTargets = targets.slice(start, start + size);
           if (chunkTargets.every(isDone)) continue;
 
-          try {
-            if (chunkTexts.length === 1) {
-              const prompt = buildStylePrompt(chunkTexts[0], style, false);
-              const { pcm, rate } = await fetchGeminiPcm(prompt, voice, key);
-              await encodePcmToTarget(pcm, rate, chunkTargets[0]);
-            } else {
-              const joined = chunkTexts.map((t) => t.trim()).join("\n\n. . .\n\n");
-              const prompt = buildStylePrompt(joined, style, true);
-              const { pcm, rate } = await fetchGeminiPcm(prompt, voice, key);
-              const slices = splitPcmByScenes(pcm, rate, chunkTexts);
-              for (let k = 0; k < chunkTargets.length; k++) {
-                await encodePcmToTarget(slices[k], rate, chunkTargets[k]);
-              }
-            }
-          } catch (chunkErr) {
-            console.warn(`[speakBatchWithGemini] Chunk at index ${start} failed with Gemini TTS:`, chunkErr);
-            if (kokoroReady()) {
-              console.log(`[speakBatchWithGemini] Falling back to Kokoro for chunk at index ${start}...`);
-              for (let k = 0; k < chunkTargets.length; k++) {
-                if (!isDone(chunkTargets[k])) {
-                  await speakWithKokoro(chunkTexts[k].trim(), "af_heart", chunkTargets[k], 0.95);
-                }
-              }
-            } else {
-              throw chunkErr;
+          if (chunkTexts.length === 1) {
+            const prompt = buildStylePrompt(chunkTexts[0], style, false);
+            const { pcm, rate } = await fetchGeminiPcm(prompt, voice, key);
+            await encodePcmToTarget(pcm, rate, chunkTargets[0]);
+          } else {
+            const joined = chunkTexts.map((t) => t.trim()).join("\n\n. . .\n\n");
+            const prompt = buildStylePrompt(joined, style, true);
+            const { pcm, rate } = await fetchGeminiPcm(prompt, voice, key);
+            const slices = splitPcmByScenes(pcm, rate, chunkTexts);
+            for (let k = 0; k < chunkTargets.length; k++) {
+              await encodePcmToTarget(slices[k], rate, chunkTargets[k]);
             }
           }
           // Gentle pacing between chunk requests to respect Google AI Studio RPM limits

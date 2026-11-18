@@ -686,26 +686,13 @@ export class LocalCore implements Core {
     const output_dir = projectDir(project);
     mkdirSync(output_dir, { recursive: true });
     const target = join(output_dir, `${this.nextStem(output_dir, "narration")}.m4a`);
-    let chosenEngine = engine;
-    let spoken;
-    if (engine === "mac") {
-      spoken = await speakLocally(text.trim(), voice, target);
-    } else if (engine === "kokoro") {
-      spoken = await speakWithKokoro(text.trim(), voice, target, speed);
-    } else {
-      try {
-        spoken = await speakWithGemini(text.trim(), voice, target, style);
-      } catch (err) {
-        if (kokoroReady()) {
-          console.warn(`[narrate] Gemini TTS failed (${(err as Error).message}), falling back to Kokoro TTS`);
-          spoken = await speakWithKokoro(text.trim(), "af_heart", target, speed ?? 0.95);
-          chosenEngine = "kokoro";
-        } else {
-          throw err;
-        }
-      }
-    }
-    return { output_dir, credits: 0, engine: chosenEngine, voice, ...spoken };
+    const spoken =
+      engine === "mac"
+        ? await speakLocally(text.trim(), voice, target)
+        : engine === "kokoro"
+          ? await speakWithKokoro(text.trim(), voice, target, speed)
+          : await speakWithGemini(text.trim(), voice, target, style);
+    return { output_dir, credits: 0, engine, voice, ...spoken };
   }
 
   async narrate_batch({ project, scenes, voice, style, chunk_size, timeout_seconds }: Args<"narrate_batch">) {
