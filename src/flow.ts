@@ -44,7 +44,8 @@ export async function getFlowState(detailed = false): Promise<FlowState> {
   else if (detailed) {
     state.plan = await page.getByRole("button", { name: "Account details" }).innerText().then((t) => t.trim().split("\n")[0], () => undefined);
     state.credits_remaining = await readCredits(page).catch(() => undefined);
-    state.composer = await settingsTrigger(page).innerText().then((t) => t.replace(/\s+/g, " ").trim(), () => undefined);
+    const trigger = await findSettingsTrigger(page);
+    state.composer = await trigger?.innerText().then((t) => t.replace(/\s+/g, " ").trim(), () => undefined);
   }
   return state;
 }
@@ -115,7 +116,89 @@ async function readCredits(page: Page): Promise<number | undefined> {
   }
 }
 
-const settingsTrigger = (page: Page) => page.getByRole("button", { name: "Settings trigger" });
+// Flow changes the accessible names of the composer controls independently of their visible labels. In November
+// 2026 the generation settings button changed from "Settings trigger" to "Settings", and the Agent toggle changed
+// from "Agent" to "Agent mode" for some accounts. Exact, page-wide lookups then stalled every generation even
+// though the controls were plainly visible. Keep the lookup inside the composer and accept both UI generations.
+async function firstVisible(candidates: Locator[]): Promise<Locator | undefined> {
+  for (const candidate of candidates) {
+    const count = await candidate.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const item = candidate.nth(i);
+      if (await item.isVisible().catch(() => false)) return item;
+    }
+  }
+  return undefined;
+}
+
+const promptBox = (page: Page) => page.locator("flow-base-prompt-box").filter({ visible: true }).last();
+
+async function visiblePromptControls(page: Page): Promise<string> {
+  const names = await promptBox(page)
+    .locator("button, [role='button'], [role='switch']")
+    .evaluateAll((els) =>
+      els
+        .filter((el) => (el as HTMLElement).offsetParent !== null)
+        .map((el) =>
+          [el.getAttribute("aria-label"), el.getAttribute("title"), (el as HTMLElement).innerText]
+            .find(Boolean)
+            ?.replace(/\s+/g, " ")
+            .trim(),
+        )
+        .filter(Boolean)
+        .slice(0, 16),
+    )
+    .catch(() => [] as string[]);
+  return names.length ? names.join(", ") : "none found";
+}
+
+async function findSettingsTrigger(page: Page): Promise<Locator | undefined> {
+  const box = promptBox(page);
+  return firstVisible([
+    box.getByRole("button", { name: /^(?:Generation )?Settings(?: trigger)?$/i }),
+    box.locator('button[aria-label*="setting" i], [role="button"][aria-label*="setting" i]'),
+    box.locator('button[title*="setting" i], [role="button"][title*="setting" i], [mattooltip*="setting" i]'),
+    box.locator("button").filter({ hasText: /^(?:tune|settings)$/i }),
+    page.getByRole("button", { name: "Settings trigger", exact: true }),
+  ]);
+}
+
+async function requireSettingsTrigger(page: Page): Promise<Locator> {
+  const trigger = await findSettingsTrigger(page);
+  if (trigger) return trigger;
+  throw new Error(`Could not find Flow's generation Settings button. Visible prompt controls: ${await visiblePromptControls(page)}.`);
+}
+
+async function findAgentToggle(page: Page): Promise<Locator | undefined> {
+  const box = promptBox(page);
+  return firstVisible([
+    box.getByRole("button", { name: /^(?:Use )?Agent(?: mode)?$/i }),
+    box.getByRole("switch", { name: /Agent/i }),
+    box.locator('[role="button"][aria-label*="agent" i], button[aria-label*="agent" i], [role="switch"][aria-label*="agent" i]'),
+    box.locator('button[title*="agent" i], [role="button"][title*="agent" i], [mattooltip*="agent" i]'),
+    box.locator("button").filter({ hasText: /^Agent(?: mode)?$/i }),
+    page.getByRole("button", { name: "Agent", exact: true }),
+  ]);
+}
+
+async function toggleState(control: Locator): Promise<boolean | undefined> {
+  return control
+    .evaluate((el) => {
+      for (const name of ["aria-pressed", "aria-checked", "aria-selected"]) {
+        const value = el.getAttribute(name);
+        if (value === "true") return true;
+        if (value === "false") return false;
+      }
+      const state = el.getAttribute("data-state")?.toLowerCase();
+      if (state && ["on", "checked", "active", "selected"].includes(state)) return true;
+      if (state && ["off", "unchecked", "inactive"].includes(state)) return false;
+      const label = `${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`;
+      if (/\b(on|enabled)\b/i.test(label)) return true;
+      if (/\b(off|disabled)\b/i.test(label)) return false;
+      return undefined;
+    })
+    .catch(() => undefined);
+}
 
 // Every finished tile carries its media id in data-media-id; some thumbnails also have it in the URL, but Flow
 // serves signed /asb/ links with no uuid, so the attribute comes first and the URL is only a fallback.
@@ -432,7 +515,8 @@ async function openSettings(page: Page): Promise<void> {
   const probe = page.getByRole("radio", { name: "Image", exact: true });
   for (let attempt = 0; attempt < 3; attempt++) {
     if (await probe.isVisible().catch(() => false)) return;
-    await settingsTrigger(page).click();
+    await dismissOverlays(page);
+    await (await requireSettingsTrigger(page)).click({ timeout: 8000 });
     await probe.waitFor({ state: "visible", timeout: 3000 }).catch(() => {});
   }
   if (!(await probe.isVisible().catch(() => false))) throw new Error("Could not open Flow's generation settings popover.");
@@ -1245,10 +1329,8 @@ export async function runGeneration(job: Job): Promise<string[]> {
 
   await ensureProjectGrid(page);
   await clearErrorTiles(page).catch(() => {});
-  const agent = page.getByRole("button", { name: "Agent", exact: true });
-  if (await agent.isVisible({ timeout: 1500 }).catch(() => false)) {
-    if ((await agent.getAttribute("aria-pressed").catch(() => null)) === "true") await agent.click().catch(() => {});
-  }
+  const agent = await findAgentToggle(page);
+  if (agent && (await toggleState(agent)) === true) await setAgentMode(page, false).catch(() => {});
   const clear = page.getByRole("button", { name: "Clear prompt" });
   if (await clear.isVisible().catch(() => false)) await clear.click();
 
@@ -1874,23 +1956,38 @@ export async function runEdit(job: Job): Promise<string[]> {
 // mode on then breaks the NEXT job, which expects the plain composer - a free character build failed that way. So this
 // confirms the toggle actually landed rather than assuming the click worked.
 async function setAgentMode(page: Page, on: boolean): Promise<void> {
-  const agent = page.getByRole("button", { name: "Agent", exact: true });
   // Playwright says why a click did not land ("<div ...> intercepts pointer events", "element is not visible"); keep
   // that, so a failure names what was in the way instead of guessing.
   let why = "";
   for (let attempt = 0; attempt < 3; attempt++) {
     await clearBackdrops(page);
     await closeAgentSettings(page);
-    if (((await agent.getAttribute("aria-pressed").catch(() => null)) === "true") === on) return;
-    await agent.click({ timeout: 8000 }).catch((err: Error) => {
-      const lines = err.message.split("\n").map((l) => l.trim());
+    const agent = await findAgentToggle(page);
+    if (!agent) {
+      why = `no Agent control was found; visible prompt controls: ${await visiblePromptControls(page)}`;
+      await pause(page, 800);
+      continue;
+    }
+    const before = await toggleState(agent);
+    if (before === on) return;
+    let clicked = false;
+    try {
+      await agent.click({ timeout: 8000 });
+      clicked = true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const lines = message.split("\n").map((l: string) => l.trim());
       why = (lines.find((l) => /intercepts pointer events|not visible|not enabled|detached|not stable/.test(l)) ?? lines[0]).slice(0, 200);
-    });
+    }
     await pause(page, 1500);
+    const current = await findAgentToggle(page);
+    const after = current ? await toggleState(current) : undefined;
+    if (after === on) return;
+    // Some Flow rollouts expose a plain button with no pressed/checked state. One successful click is the only
+    // observable transition; the following Agent settings step verifies that switching on really succeeded.
+    if (clicked && before === undefined && after === undefined) return;
   }
-  if (((await agent.getAttribute("aria-pressed").catch(() => null)) === "true") !== on) {
-    throw new Error(`Could not switch Agent mode ${on ? "on" : "off"}${why ? ` (${why})` : "; the click landed but the toggle did not change"}.`);
-  }
+  throw new Error(`Could not switch Agent mode ${on ? "on" : "off"}${why ? ` (${why})` : "; the click landed but the toggle did not change"}.`);
 }
 
 // "Never" lets the agent generate without asking; it is switched back to "Always" as soon as the batch ends.
@@ -1898,7 +1995,7 @@ async function setAgentSettings(page: Page, confirm: "Always" | "Never", imageAs
   // Scoped to the prompt box: Flow added a second "Settings" button to the top bar ("View settings", seen 2026-10-13),
   // and an unscoped lookup matched both and failed every agent batch.
   await clearBackdrops(page);
-  await page.locator("flow-base-prompt-box").getByRole("button", { name: "Settings", exact: true }).click();
+  await (await requireSettingsTrigger(page)).click({ timeout: 8000 });
   try {
     await page.getByRole("heading", { name: "Agent settings" }).waitFor({ state: "visible", timeout: 8000 });
     await page.getByRole("radio", { name: new RegExp(`^${confirm}`) }).click();
