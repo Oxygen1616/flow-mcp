@@ -138,6 +138,27 @@ async function firstVisible(candidates: Locator[]): Promise<Locator | undefined>
 
 const promptBox = (page: Page) => page.locator("flow-base-prompt-box").filter({ visible: true }).last();
 
+// The prompt editor that is actually on screen: with the agent side panel open (Nov 2026) the main composer is
+// hidden and the panel's own editor is the one to type into.
+const visibleEditor = (page: Page) => page.locator(".ProseMirror").filter({ visible: true }).last();
+
+// Flow Agent became a side panel (mapped live 2026-11-21): the composer's "Flow Agent" button opens a chat panel
+// ("Untitled session", "Open session history", "Agent settings", "Close") with its own prompt box, and the main
+// composer - Flow Agent button included - is hidden while it is open. So "agent on" is "panel open".
+const agentPanelMarker = (page: Page) =>
+  page.getByRole("separator", { name: "Resize agent panel" }).or(page.getByRole("button", { name: "Open session history" }));
+async function agentPanelOpen(page: Page): Promise<boolean> {
+  return agentPanelMarker(page).first().isVisible().catch(() => false);
+}
+async function closeAgentPanel(page: Page): Promise<void> {
+  const close = page.getByRole("button", { name: "Close", exact: true }).filter({ hasText: "right_panel_close" }).first();
+  if (await close.isVisible().catch(() => false)) {
+    await clearBackdrops(page);
+    await close.click({ timeout: 5000 }).catch(() => {});
+    await pause(page, 1200);
+  }
+}
+
 async function visiblePromptControls(page: Page): Promise<string> {
   const names = await promptBox(page)
     .locator("button, [role='button'], [role='switch']")
@@ -520,6 +541,7 @@ async function waitForNewMedia(page: Page, before: string[], count: number, time
 }
 
 async function openSettings(page: Page): Promise<void> {
+  if (await agentPanelOpen(page)) await closeAgentPanel(page);
   const agent = await findAgentToggle(page);
   if (agent && (await toggleState(agent)) === true) {
     await setAgentMode(page, false).catch(() => {});
@@ -721,7 +743,7 @@ export async function attachAsset(page: Page, opener: Locator, assetName: string
 }
 
 async function typePrompt(page: Page, prompt: string): Promise<void> {
-  const box = page.locator(".ProseMirror").first();
+  const box = visibleEditor(page);
   await box.click();
   await page.keyboard.press("ControlOrMeta+a");
   await page.keyboard.press("Delete");
@@ -1988,6 +2010,13 @@ async function setAgentMode(page: Page, on: boolean): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     await clearBackdrops(page);
     await closeAgentSettings(page);
+    if (await agentPanelOpen(page)) {
+      if (on) return;
+      await closeAgentPanel(page);
+      if (!(await agentPanelOpen(page))) return;
+      why = "the agent panel would not close";
+      continue;
+    }
     const agent = await findAgentToggle(page);
     if (!agent) {
       why = `no Agent control was found; visible prompt controls: ${await visiblePromptControls(page)}`;
@@ -2006,6 +2035,7 @@ async function setAgentMode(page: Page, on: boolean): Promise<void> {
       why = (lines.find((l) => /intercepts pointer events|not visible|not enabled|detached|not stable/.test(l)) ?? lines[0]).slice(0, 200);
     }
     await pause(page, 1500);
+    if (on && (await agentPanelOpen(page))) return;
     const current = await findAgentToggle(page);
     const after = current ? await toggleState(current) : undefined;
     if (after === on) return;
@@ -2077,7 +2107,9 @@ export async function inspectAgentSettings(page: Page): Promise<unknown> {
   try {
     await setAgentMode(page, true);
     await clearBackdrops(page);
-    await (await requireSettingsTrigger(page)).click({ timeout: 8000 });
+    const gear = page.getByRole("button", { name: "Agent settings", exact: true }).filter({ visible: true }).first();
+    if (await gear.isVisible().catch(() => false)) await gear.click({ timeout: 8000 });
+    else await (await requireSettingsTrigger(page)).click({ timeout: 8000 });
     await pause(page, 1500);
     return await page.evaluate(() => {
       const root = document.querySelector("flow-agent-panel") ?? document.body;
@@ -2103,7 +2135,9 @@ async function setAgentSettings(page: Page, confirm: "Always" | "Never", imageAs
   // Scoped to the prompt box: Flow added a second "Settings" button to the top bar ("View settings", seen 2026-10-13),
   // and an unscoped lookup matched both and failed every agent batch.
   await clearBackdrops(page);
-  await (await requireSettingsTrigger(page)).click({ timeout: 8000 });
+  const panelGear = page.getByRole("button", { name: "Agent settings", exact: true }).filter({ visible: true }).first();
+  if (await panelGear.isVisible().catch(() => false)) await panelGear.click({ timeout: 8000 });
+  else await (await requireSettingsTrigger(page)).click({ timeout: 8000 });
   try {
     // Mapped live 2026-11-21: the panel's confirm choice is a toggle group whose radios are named "Always info" /
     // "Never info"; the image aspect, output count and model moved to an "Image defaults" sub-page; there is no Save
@@ -2155,13 +2189,13 @@ async function setAgentSettings(page: Page, confirm: "Always" | "Never", imageAs
 async function closeAgentSession(page: Page): Promise<void> {
   const panel = page.getByRole("button", { name: "Start new session" });
   if (await panel.isVisible().catch(() => false)) {
-    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByRole("button", { name: "Close", exact: true }).filter({ visible: true }).first().click();
     await pause(page, 1000);
   }
   const clear = page.getByRole("button", { name: "Clear prompt" });
   if (await clear.isVisible().catch(() => false)) await clear.click();
   else {
-    await page.locator(".ProseMirror").first().click();
+    await visibleEditor(page).click();
     await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.press("Delete");
   }
@@ -2289,10 +2323,10 @@ async function agentRound(
     ? `${indexes.length} image(s) from the last batch failed to generate. Generate them again now, one image per scene`
     : `Generate exactly ${indexes.length} separate images, one image per scene, in scene order`;
   const ask = `${lead}. Images only, never video. ${aspect} aspect ratio. Do not ask questions, generate them now.${legend} ${script}`;
-  await page.locator(".ProseMirror").first().click();
+  await visibleEditor(page).click();
   await page.keyboard.type(ask, { delay: 6 });
   await pause(page, 800);
-  const start = page.getByRole("button", { name: "Start generation" });
+  const start = page.getByRole("button", { name: "Start generation" }).filter({ visible: true }).last();
   if (!(await start.isEnabled())) throw new Error("Flow's agent did not accept the script (Start generation stayed disabled).");
   const textBefore = new Set((await page.locator("body").innerText().catch(() => "")).split("\n").map((l) => l.trim()));
   await start.click();
@@ -2348,7 +2382,7 @@ async function agentRound(
     await el.hover();
     await el.getByRole("button", { name: "Reuse prompt" }).click();
     await pause(page, 900);
-    prompts.push(await page.locator(".ProseMirror").first().innerText());
+    prompts.push(await visibleEditor(page).innerText());
   }
   await closeAgentSession(page);
 
