@@ -93,17 +93,29 @@ export async function getFlowPage(): Promise<Page> {
   const projectPage = pages.find((p) => /\/project\//.test(p.url()));
   if (projectPage) {
     await ensureEnglish(projectPage);
+    await ensureDesktopWidth(projectPage);
     return projectPage;
   }
   const existing = pages.find((p) => FLOW_HOSTS.test(p.url()));
   if (existing) {
     await ensureEnglish(existing);
+    await ensureDesktopWidth(existing);
     return existing;
   }
   const page = await context.newPage();
   await page.goto(inEnglish(FLOW_URL), { waitUntil: "domcontentloaded" });
   await ensureEnglish(page);
+  await ensureDesktopWidth(page);
   return page;
+}
+
+// Flow hides the "Flow Agent" button (and other composer controls) below desktop width. The Brave window on Umbrel takes
+// the size of whatever screen last viewed its stream - a phone left it 672 px wide on 2026-11-21, and every agent batch
+// then failed with "no Agent control was found". So the Flow tab is always laid out at a desktop size.
+const DESKTOP = { width: 1440, height: 900 };
+export async function ensureDesktopWidth(page: Page): Promise<void> {
+  const width = await page.evaluate(() => window.innerWidth).catch(() => 0);
+  if (width && width < 1200) await page.setViewportSize(DESKTOP).catch(() => {});
 }
 
 // Reloads Flow in English when it is showing in another language (a page the user opened by hand, or Flow redirecting

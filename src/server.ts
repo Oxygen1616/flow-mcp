@@ -147,7 +147,10 @@ export async function startServer(core: Core): Promise<ServerRole> {
           await new Promise((r) => setTimeout(r, 1500));
           const opened: string[] = [];
           for (const name of (url.searchParams.get("open") ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
-            const target = page.getByRole("button", { name, exact: true }).first();
+            // "~Image defaults" matches a button whose name merely contains the text.
+            const target = name.startsWith("~")
+              ? page.getByRole("button", { name: new RegExp(name.slice(1).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") }).first()
+              : page.getByRole("button", { name, exact: true }).first();
             const ok = await target.click({ timeout: 5000 }).then(() => true, () => false);
             opened.push(`${name}: ${ok ? "clicked" : "not found"}`);
             await new Promise((r) => setTimeout(r, 1500));
@@ -165,7 +168,7 @@ export async function startServer(core: Core): Promise<ServerRole> {
                 text: (el as HTMLElement).innerText?.replace(/\s+/g, " ").trim().slice(0, 80),
               })),
           }));
-          if (opened.length) await page.keyboard.press("Escape").catch(() => {});
+          if (opened.length && url.searchParams.get("keep") !== "1") await page.keyboard.press("Escape").catch(() => {});
           await cdp.detach().catch(() => {});
           return json(res, 200, { opened, ...controls, screenshot: join(OUTPUT_ROOT, "inspect.png") });
         } else if (action === "agent_settings") {

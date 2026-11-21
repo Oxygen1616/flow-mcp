@@ -91,9 +91,14 @@ async function pickAgentImageModel(page: Page): Promise<void> {
 }
 
 // The agent settings panel replaces the composer, hiding the Agent button; Back closes it without saving.
+// A sub-page (Image defaults) needs a second Back, so this repeats until no Back is showing.
 async function closeAgentSettings(page: Page): Promise<void> {
-  const back = page.locator("flow-agent-panel").getByRole("button", { name: "Back", exact: true });
-  if (await back.isVisible().catch(() => false)) {
+  for (let i = 0; i < 3; i++) {
+    const back = await firstVisible([
+      page.locator("flow-agent-panel").getByRole("button", { name: "Back", exact: true }),
+      page.getByRole("button", { name: "Back", exact: true }),
+    ]);
+    if (!back) return;
     await clearBackdrops(page);
     await back.click({ timeout: 5000 }).catch(() => {});
     await pause(page, 800);
@@ -2100,22 +2105,46 @@ async function setAgentSettings(page: Page, confirm: "Always" | "Never", imageAs
   await clearBackdrops(page);
   await (await requireSettingsTrigger(page)).click({ timeout: 8000 });
   try {
-    await page.getByRole("heading", { name: "Agent settings" }).waitFor({ state: "visible", timeout: 8000 });
-    await page.getByRole("radio", { name: new RegExp(`^${confirm}`) }).click();
+    // Mapped live 2026-11-21: the panel's confirm choice is a toggle group whose radios are named "Always info" /
+    // "Never info"; the image aspect, output count and model moved to an "Image defaults" sub-page; there is no Save
+    // button any more (changes apply at once). The older layout (radios + Save on one page) is still handled.
+    const confirmRadio = page.getByRole("radio", { name: new RegExp(`^${confirm}`) }).first();
+    await confirmRadio.waitFor({ state: "visible", timeout: 8000 });
+    if ((await toggleState(confirmRadio)) !== true) await confirmRadio.click({ timeout: 5000 });
+    await pause(page, 400);
     if (imageAspect) {
-      // Flow's Agent settings stopped exposing a radio named exactly "16:9" (2026-11-21: a 30-image batch died waiting
-      // 30 s for it). The aspect is only a default - every agent prompt also states it in words - so a control that
-      // cannot be found is noted and the batch carries on, instead of the whole batch failing.
-      if (!(await pickAgentAspect(page, imageAspect))) {
-        process.stderr.write(`flow-mcp: Agent settings has no recognisable "${imageAspect}" control; relying on the prompt.\n`);
+      const imageDefaults = page.getByRole("button", { name: /Image defaults/i }).first();
+      const subPage = await imageDefaults.isVisible().catch(() => false);
+      if (subPage) {
+        await imageDefaults.click({ timeout: 5000 });
+        await pause(page, 1200);
       }
-      const x1 = page.getByRole("radio", { name: /(^|\s)x1$/ }).first();
-      if (await x1.isVisible().catch(() => false)) await x1.click({ timeout: 4000 }).catch(() => {});
+      // The aspect is only a default - every agent prompt also states it in words - so a control that cannot be found
+      // is noted and the batch carries on (a 30-image batch died over this on 2026-11-21).
+      if (!(await pickAgentAspect(page, imageAspect))) {
+        process.stderr.write(`flow-mcp: Agent settings has no recognisable "${imageAspect}" control; relying on the prompt.
+`);
+      }
+      // One picture per scene: "2 outputs" (seen as the default) would double every batch.
+      const one = await firstVisible([
+        page.getByRole("radio", { name: /^(x1|1)(\s*outputs?)?$/i }),
+        page.getByRole("radio", { name: /(^|\s)x1$/ }),
+        page.getByRole("button", { name: /^(x1|1)(\s*outputs?)?$/i }),
+        page.locator("mat-button-toggle, [role=radio]").filter({ hasText: /^\s*(x1|1)(\s*outputs?)?\s*$/i }),
+      ]);
+      if (one && (await toggleState(one)) !== true) await one.click({ timeout: 4000 }).catch(() => {});
       await pickAgentImageModel(page);
+      if (subPage) {
+        await page.getByRole("button", { name: "Back", exact: true }).first().click({ timeout: 5000 }).catch(() => {});
+        await pause(page, 800);
+      }
     }
     await pause(page, 300);
-    await page.getByRole("button", { name: "Save", exact: true }).click();
-    await pause(page, 1200);
+    const save = page.getByRole("button", { name: "Save", exact: true }).first();
+    if (await save.isVisible().catch(() => false)) {
+      await save.click({ timeout: 5000 });
+      await pause(page, 1200);
+    }
   } finally {
     // Saved or not, never leave the panel covering the composer: the next step needs the Agent button.
     await closeAgentSettings(page);
