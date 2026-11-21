@@ -172,12 +172,12 @@ async function requireSettingsTrigger(page: Page): Promise<Locator> {
 async function findAgentToggle(page: Page): Promise<Locator | undefined> {
   const box = promptBox(page);
   return firstVisible([
-    box.getByRole("button", { name: /^(?:Use )?Agent(?: mode)?$/i }),
+    box.getByRole("button", { name: /^(?:Flow |Use )?Agent(?: mode)?$/i }),
     box.getByRole("switch", { name: /Agent/i }),
-    box.locator('[role="button"][aria-label*="agent" i], button[aria-label*="agent" i], [role="switch"][aria-label*="agent" i]'),
-    box.locator('button[title*="agent" i], [role="button"][title*="agent" i], [mattooltip*="agent" i]'),
-    box.locator("button").filter({ hasText: /^Agent(?: mode)?$/i }),
-    page.getByRole("button", { name: "Agent", exact: true }),
+    box.locator('[role="button"][aria-label*="agent" i]:not([aria-label*="setting" i]), button[aria-label*="agent" i]:not([aria-label*="setting" i]), [role="switch"][aria-label*="agent" i]'),
+    box.locator('button[title*="agent" i]:not([title*="setting" i]), [role="button"][title*="agent" i]:not([title*="setting" i]), [mattooltip*="agent" i]'),
+    box.locator("button").filter({ hasText: /^(?:spark|spark_off|Agent(?: mode)?)$/i }),
+    page.getByRole("button", { name: /^(?:Flow )?Agent$/i }),
   ]);
 }
 
@@ -192,6 +192,9 @@ async function toggleState(control: Locator): Promise<boolean | undefined> {
       const state = el.getAttribute("data-state")?.toLowerCase();
       if (state && ["on", "checked", "active", "selected"].includes(state)) return true;
       if (state && ["off", "unchecked", "inactive"].includes(state)) return false;
+      const text = ((el as HTMLElement).innerText || "").trim().toLowerCase();
+      if (text === "spark") return true;
+      if (text === "spark_off") return false;
       const label = `${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`;
       if (/\b(on|enabled)\b/i.test(label)) return true;
       if (/\b(off|disabled)\b/i.test(label)) return false;
@@ -512,6 +515,10 @@ async function waitForNewMedia(page: Page, before: string[], count: number, time
 }
 
 async function openSettings(page: Page): Promise<void> {
+  const agent = await findAgentToggle(page);
+  if (agent && (await toggleState(agent)) === true) {
+    await setAgentMode(page, false).catch(() => {});
+  }
   const probe = page.getByRole("radio", { name: "Image", exact: true });
   for (let attempt = 0; attempt < 3; attempt++) {
     if (await probe.isVisible().catch(() => false)) return;
