@@ -530,7 +530,21 @@ async function openSettings(page: Page): Promise<void> {
 }
 
 async function pickRadio(page: Page, name: string | RegExp): Promise<void> {
-  const radio = page.getByRole("radio", { name, exact: typeof name === "string" }).first();
+  let radio = page.getByRole("radio", { name, exact: typeof name === "string" }).first();
+  // An aspect label may now carry an icon ligature ("crop_16_9 16:9"), so match aspects by their numbers. Other names
+  // stay exact: a loose "4s" would also match "14s".
+  if (!(await radio.isVisible().catch(() => false)) && typeof name === "string" && /^\d+\s*:\s*\d+$/.test(name)) {
+    radio = page.getByRole("radio", { name: aspectPattern(name) }).first();
+  }
+  if (!(await radio.isVisible().catch(() => false))) {
+    if (typeof name === "string" && name === "16:9") {
+      radio = page.getByRole("radio", { name: /landscape|wide/i }).first();
+    } else if (typeof name === "string" && name === "9:16") {
+      radio = page.getByRole("radio", { name: /portrait|vertical/i }).first();
+    } else if (typeof name === "string" && name === "1:1") {
+      radio = page.getByRole("radio", { name: /square/i }).first();
+    }
+  }
   if (!(await radio.isVisible().catch(() => false))) {
     throw new Error(`Flow has no "${name}" option for the current mode/model.`);
   }
@@ -1997,6 +2011,88 @@ async function setAgentMode(page: Page, on: boolean): Promise<void> {
   throw new Error(`Could not switch Agent mode ${on ? "on" : "off"}${why ? ` (${why})` : "; the click landed but the toggle did not change"}.`);
 }
 
+// Matches an aspect label however Flow writes it: "16:9", "16 : 9", "crop_16_9 16:9" (icon ligature in the name),
+// "Landscape (16:9)", "Landscape", etc. Anchored on digits so "16:9" never matches "9:16".
+export function aspectPattern(aspect: string): RegExp {
+  const [w, h] = aspect.split(":").map((x) => x.trim());
+  let extra = "";
+  if (aspect === "16:9") extra = "|landscape|wide|crop_landscape";
+  else if (aspect === "9:16") extra = "|portrait|vertical|crop_portrait";
+  else if (aspect === "1:1") extra = "|square|crop_square";
+  return new RegExp(`((^|[^0-9])${w}\\s*[:_x×]\\s*${h}([^0-9]|$)${extra})`, "i");
+}
+
+// Picks the image aspect in Agent settings. Returns false when no matching control exists, so the caller can go on.
+async function pickAgentAspect(page: Page, aspect: string): Promise<boolean> {
+  const re = aspectPattern(aspect);
+  const panel = page.locator("flow-agent-panel");
+  const scope = (await panel.isVisible().catch(() => false)) ? panel : page.locator("body");
+  const direct = () =>
+    firstVisible([
+      scope.getByRole("radio", { name: re }),
+      scope.getByRole("menuitemradio", { name: re }),
+      scope.getByRole("option", { name: re }),
+      scope.getByRole("tab", { name: re }),
+      scope.getByRole("button", { name: re }),
+      scope.locator("mat-button-toggle, label, [role=radio]").filter({ hasText: re }),
+    ]);
+  let control = await direct();
+  if (!control) {
+    // Some rollouts fold the choices into a dropdown ("Aspect ratio" / showing the current one). Open it and look again.
+    const opener = await firstVisible([
+      scope.getByRole("button", { name: /aspect|ratio/i }),
+      scope.getByRole("combobox", { name: /aspect|ratio/i }),
+      scope.getByRole("combobox"),
+    ]);
+    if (!opener) return false;
+    await opener.click({ timeout: 4000 }).catch(() => {});
+    await pause(page, 600);
+    control = await firstVisible([
+      page.getByRole("option", { name: re }),
+      page.getByRole("menuitemradio", { name: re }),
+      page.getByRole("menuitem", { name: re }),
+      page.getByRole("radio", { name: re }),
+    ]);
+    if (!control) {
+      await page.keyboard.press("Escape");
+      await clearBackdrops(page);
+      return false;
+    }
+  }
+  const checked = await toggleState(control);
+  if (checked !== true) await control.click({ timeout: 5000 }).catch(() => {});
+  await pause(page, 400);
+  return true;
+}
+
+// Opens Agent settings, lists every control in it (role, accessible label, text), then puts everything back. Used by
+// /api/inspect?action=agent_settings to map a changed panel from the live page instead of guessing.
+export async function inspectAgentSettings(page: Page): Promise<unknown> {
+  const wasOn = (await findAgentToggle(page).then((t) => (t ? toggleState(t) : undefined))) === true;
+  try {
+    await setAgentMode(page, true);
+    await clearBackdrops(page);
+    await (await requireSettingsTrigger(page)).click({ timeout: 8000 });
+    await pause(page, 1500);
+    return await page.evaluate(() => {
+      const root = document.querySelector("flow-agent-panel") ?? document.body;
+      return [...root.querySelectorAll("button, [role], input, label, mat-button-toggle, h1, h2, h3")]
+        .filter((el) => (el as HTMLElement).offsetParent !== null)
+        .map((el) => ({
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute("role"),
+          type: el.getAttribute("type"),
+          aria: el.getAttribute("aria-label"),
+          checked: el.getAttribute("aria-checked") ?? el.getAttribute("aria-pressed") ?? ((el as HTMLInputElement).checked ? "true" : null),
+          text: (el as HTMLElement).innerText?.replace(/\s+/g, " ").trim().slice(0, 80),
+        }));
+    });
+  } finally {
+    await closeAgentSettings(page).catch(() => {});
+    if (!wasOn) await setAgentMode(page, false).catch(() => {});
+  }
+}
+
 // "Never" lets the agent generate without asking; it is switched back to "Always" as soon as the batch ends.
 async function setAgentSettings(page: Page, confirm: "Always" | "Never", imageAspect?: string): Promise<void> {
   // Scoped to the prompt box: Flow added a second "Settings" button to the top bar ("View settings", seen 2026-10-13),
@@ -2007,9 +2103,14 @@ async function setAgentSettings(page: Page, confirm: "Always" | "Never", imageAs
     await page.getByRole("heading", { name: "Agent settings" }).waitFor({ state: "visible", timeout: 8000 });
     await page.getByRole("radio", { name: new RegExp(`^${confirm}`) }).click();
     if (imageAspect) {
-      await page.getByRole("radio", { name: imageAspect, exact: true }).first().click();
-      const x1 = page.getByRole("radio", { name: "x1", exact: true }).first();
-      if (await x1.isVisible().catch(() => false)) await x1.click().catch(() => {});
+      // Flow's Agent settings stopped exposing a radio named exactly "16:9" (2026-11-21: a 30-image batch died waiting
+      // 30 s for it). The aspect is only a default - every agent prompt also states it in words - so a control that
+      // cannot be found is noted and the batch carries on, instead of the whole batch failing.
+      if (!(await pickAgentAspect(page, imageAspect))) {
+        process.stderr.write(`flow-mcp: Agent settings has no recognisable "${imageAspect}" control; relying on the prompt.\n`);
+      }
+      const x1 = page.getByRole("radio", { name: /(^|\s)x1$/ }).first();
+      if (await x1.isVisible().catch(() => false)) await x1.click({ timeout: 4000 }).catch(() => {});
       await pickAgentImageModel(page);
     }
     await pause(page, 300);
@@ -2406,6 +2507,13 @@ export async function runAgentBatch(job: Job): Promise<string[]> {
         assets.push(await uploadAsset(page, job, r.image, label));
       }
       s.agent_ref_assets = assets;
+    }
+    if (s.aspect_ratio) {
+      try {
+        await openSettings(page);
+        await pickRadio(page, s.aspect_ratio);
+        await dismissOverlays(page);
+      } catch {}
     }
     step(job, "switching Agent mode on");
     await setAgentMode(page, true);
